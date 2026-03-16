@@ -19,7 +19,10 @@ function normalizeJournal(j) {
     name: j?.name || "Untitled Journal",
     editorValue: j?.editorValue || DEFAULT_EDITOR,
     vars: j?.vars || DEFAULT_VARS,
-    videoSrc: j?.videoSrc || null, // NEW: Track video per journal
+    videoSrc: j?.videoSrc || null,
+    generatedModel: j?.generatedModel || null,
+    generatedTopic: j?.generatedTopic || null,
+    simConfig: j?.simConfig || null,
   };
 }
 
@@ -89,6 +92,31 @@ export const useLoominStore = create((set, get) => ({
     const { activeId } = get();
     set((s) => ({
       journals: s.journals.map((j) => j.id === activeId ? { ...j, videoSrc: url } : j),
+    }));
+    saveToLS(get());
+  },
+
+  // Save generated 3D model to prevent regeneration
+  setGeneratedModel: (model, topic) => {
+    const { activeId } = get();
+    set((s) => ({
+      journals: s.journals.map((j) => j.id === activeId ? { ...j, generatedModel: model, generatedTopic: topic } : j),
+    }));
+    saveToLS(get());
+  },
+
+  clearGeneratedModel: () => {
+    const { activeId } = get();
+    set((s) => ({
+      journals: s.journals.map((j) => j.id === activeId ? { ...j, generatedModel: null, generatedTopic: null } : j),
+    }));
+    saveToLS(get());
+  },
+
+  setSimConfig: (config) => {
+    const { activeId } = get();
+    set((s) => ({
+      journals: s.journals.map((j) => j.id === activeId ? { ...j, simConfig: config } : j),
     }));
     saveToLS(get());
   },

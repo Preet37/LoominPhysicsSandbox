@@ -1,15 +1,25 @@
 "use client";
 
-import { useRef, useMemo } from "react";
+import { useRef, useMemo, useState } from "react";
 import { useFrame } from "@react-three/fiber";
 import { Html, RoundedBox } from "@react-three/drei";
 import { useLoominStore } from "../store";
+import ProceduralModel from "./ProceduralModel";
+import Tripo3DModel from "./Tripo3DModel";
+import HighQualityModel from "./HighQualityModel";
 
 // Generic 3D visualization for topics without specific simulations
-// This creates basic visual representations of various concepts
+// Priority: Tripo3D (real models) > Procedural (primitives) > Pre-built
+
+// Pre-built topics (fast, no API call)
+const PREBUILT_TOPICS = ['motherboard', 'circuit', 'mechanical', 'solar', 'engine'];
 
 export default function GenericVisual() {
   const groupRef = useRef();
+  // Tripo3D DISABLED - GLB loading fails, wastes credits
+  // Using HighQualityModel instead (generates component code like Arm.jsx)
+  const [useTripo, setUseTripo] = useState(false);
+  const [tripoFailed, setTripoFailed] = useState(true);
   
   const activeId = useLoominStore((s) => s.activeId);
   const journals = useLoominStore((s) => s.journals);
@@ -18,32 +28,105 @@ export default function GenericVisual() {
   const editorValue = active?.editorValue || "";
   
   // Detect topic from editor content
-  const topic = useMemo(() => {
-    const lower = editorValue.toLowerCase();
+  const { topic, extractedTopic } = useMemo(() => {
+    const lower = editorValue.toLowerCase().trim();
+    const trimmed = editorValue.trim();
+    
+    // PRIORITY 1: Look for "Introduction to X" or "## X" headers first
+    // This catches: "## Introduction to Teddy Bears" -> "teddy bear"
+    const introMatch = lower.match(/introduction\s+to\s+([a-z][a-z\s]{2,30})/i);
+    if (introMatch) {
+      let extracted = introMatch[1].trim();
+      // Remove plural 's' for cleaner topic
+      if (extracted.endsWith('s') && extracted.length > 4) {
+        extracted = extracted.slice(0, -1);
+      }
+      return { topic: 'ai-generate', extractedTopic: extracted };
+    }
+    
+    // PRIORITY 2: Headers like "## Teddy Bears" or "# Sports Car"
+    const headerMatch = trimmed.match(/^#{1,3}\s+(?:Introduction\s+to\s+)?([A-Za-z][A-Za-z\s]{2,40})/m);
+    if (headerMatch) {
+      let extracted = headerMatch[1].trim();
+      // Skip generic headers
+      const skipHeaders = ['new project', 'overview', 'introduction', 'summary', 'notes', 'history', 'design'];
+      if (!skipHeaders.includes(extracted.toLowerCase())) {
+        return { topic: 'ai-generate', extractedTopic: extracted };
+      }
+    }
+    
+    // PRIORITY 3: Simple short topic (1-4 words, just letters/spaces)
+    // This catches: "sports car", "helicopter", "robot arm", etc.
+    if (trimmed.length >= 2 && 
+        trimmed.length <= 50 && 
+        /^[a-zA-Z][a-zA-Z\s\-]*$/i.test(trimmed) &&
+        trimmed.split(/\s+/).length <= 4) {
+      const presetKeywords = ['motherboard', 'circuit', 'gear', 'solar', 'engine', 'turbine', 'arm'];
+      if (!presetKeywords.includes(lower)) {
+        return { topic: 'ai-generate', extractedTopic: trimmed };
+      }
+    }
+    
+    // PRIORITY 4: Natural language commands
+    const generateMatch = lower.match(/(?:generate|create|make|build|show\s*me|draw|render|visualize|display)\s+(?:a|an|the|some)?\s*([a-z][a-z0-9\s\-]{1,40})/i);
+    if (generateMatch) {
+      const extracted = generateMatch[1].trim().replace(/\s+/g, ' ').slice(0, 50);
+      const skipWords = ['it', 'this', 'that', 'one', 'thing', 'something', 'model', '3d'];
+      if (extracted && !skipWords.includes(extracted)) {
+        return { topic: 'ai-generate', extractedTopic: extracted };
+      }
+    }
+    
+    // PRIORITY 5: Topic headers like "Topic: Car"
+    const topicMatch = lower.match(/(?:topic|subject|about|studying|learning):\s*([a-z][a-z\s]{2,40})/i);
+    if (topicMatch) {
+      const extracted = topicMatch[1].trim().slice(0, 50);
+      return { topic: 'ai-generate', extractedTopic: extracted };
+    }
+    
+    // PRIORITY 4: Pre-built topics (only if text contains these specific words)
     if (lower.includes('motherboard') || lower.includes('cpu') || lower.includes('ram') || lower.includes('chipset')) {
-      return 'motherboard';
+      return { topic: 'motherboard', extractedTopic: null };
     }
     if (lower.includes('circuit') || lower.includes('resistor') || lower.includes('capacitor') || lower.includes('led')) {
-      return 'circuit';
+      return { topic: 'circuit', extractedTopic: null };
     }
     if (lower.includes('gear') || lower.includes('mechanical') || lower.includes('lever') || lower.includes('pulley')) {
-      return 'mechanical';
+      return { topic: 'mechanical', extractedTopic: null };
     }
-    if (lower.includes('solar') || lower.includes('panel') || lower.includes('photovoltaic')) {
-      return 'solar';
+    if (lower.includes('solar panel') || lower.includes('photovoltaic')) {
+      return { topic: 'solar', extractedTopic: null };
     }
-    if (lower.includes('engine') || lower.includes('piston') || lower.includes('cylinder')) {
-      return 'engine';
+    if (lower.includes('piston') || lower.includes('cylinder head')) {
+      return { topic: 'engine', extractedTopic: null };
     }
-    return 'generic';
+    
+    return { topic: 'generic', extractedTopic: null };
   }, [editorValue]);
 
-  // Gentle rotation animation
+  // Gentle rotation animation for pre-built models
   useFrame((state, delta) => {
-    if (groupRef.current) {
+    if (groupRef.current && PREBUILT_TOPICS.includes(topic)) {
       groupRef.current.rotation.y += delta * 0.2;
     }
   });
+
+  // Use AI-generated model for unknown topics
+  // Priority: Tripo3D (real 3D) > HighQualityModel (detailed components) > Procedural (primitives)
+  if (topic === 'ai-generate' && extractedTopic) {
+    // Try Tripo3D first for real 3D models (uses credits)
+    if (useTripo && !tripoFailed) {
+      return (
+        <Tripo3DModel 
+          topic={extractedTopic} 
+          onFallback={() => setTripoFailed(true)} 
+        />
+      );
+    }
+    
+    // Use high-quality model generator (like Arm.jsx quality)
+    return <HighQualityModel topic={extractedTopic} context={editorValue.slice(0, 500)} />;
+  }
 
   return (
     <group ref={groupRef} position={[0, 2, 0]}>
@@ -57,7 +140,7 @@ export default function GenericVisual() {
       <Html position={[0, -3, 0]} center>
         <div className="bg-slate-900/90 px-4 py-2 rounded-xl border border-white/10 text-center">
           <p className="text-xs text-white/50 uppercase tracking-wider">Visualizing</p>
-          <p className="text-sm font-semibold text-white capitalize">{topic}</p>
+          <p className="text-sm font-semibold text-white capitalize">{topic === 'ai-generate' ? 'generic' : topic}</p>
         </div>
       </Html>
     </group>

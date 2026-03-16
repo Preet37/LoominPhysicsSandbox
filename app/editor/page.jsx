@@ -1,17 +1,20 @@
-// app/loomin/page.jsx
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { motion } from "framer-motion";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import dynamic from "next/dynamic";
-import Scene from "./Scene";
-import JournalsNav from "./components/JournalsNav";
-import { Leaf } from "lucide-react";
+import { Sparkles, Send, Loader2, Brain, Zap, AlertTriangle, CheckCircle } from "lucide-react";
 import { useLoominStore } from "./store";
+import PhysicsScene from "./PhysicsScene";
+import StatusCard from "./components/StatusCard";
+import AskAIDrawer from "./components/AskAIDrawer";
+import JournalsNav from "./components/JournalsNav";
 
 const Monaco = dynamic(() => import("@monaco-editor/react"), { ssr: false });
 
-function debounce(fn, wait = 250) {
+// ── helpers ────────────────────────────────────────────────────────────────
+
+function debounce(fn, wait = 150) {
   let t;
   return (...args) => {
     clearTimeout(t);
@@ -19,171 +22,418 @@ function debounce(fn, wait = 250) {
   };
 }
 
-function extractKeyValuePairs(text) {
+function parseParams(text) {
   const out = {};
-  const re = /(^|\n)\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:)\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*(?=\n|$)/g;
+  // Match: PARAM_NAME = 12 or PARAM_NAME = 12.5 // optional comment
+  const re = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([-+]?(?:\d+\.?\d*|\.\d+))\s*(?:\/\/.*)?$/gm;
   let m;
   while ((m = re.exec(text)) !== null) {
-    const key = m[2];
-    const num = Number(m[3]);
-    if (!Number.isNaN(num)) out[key] = num;
+    const num = parseFloat(m[2]);
+    if (!isNaN(num)) out[m[1]] = num;
   }
   return out;
 }
 
-function computeRotationSpeed(vars) {
-  const w = typeof vars?.Wind_Speed === "number" ? vars.Wind_Speed : 12;
-  return Math.max(0, w) * 0.12;
+function parseSIMCONFIG(text) {
+  const match = text.match(/<SIMCONFIG>([\s\S]*?)<\/SIMCONFIG>/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1].trim());
+  } catch {
+    return null;
+  }
 }
 
-export default function Page() {
+function validatePhysics(simConfig, params) {
+  if (!simConfig?.constraints?.length) {
+    return { state: "OPTIMAL", explanation: "", fixedParams: simConfig?.optimalParams || {} };
+  }
+  let worst = "OPTIMAL";
+  let explanation = "";
+  for (const c of simConfig.constraints) {
+    const val = params[c.param];
+    if (val === undefined) continue;
+    if (val >= (c.criticalThreshold ?? Infinity)) {
+      worst = "CRITICAL_FAILURE";
+      explanation = c.explanation || `${c.param} has exceeded its critical threshold.`;
+      break;
+    } else if (val >= (c.warningThreshold ?? Infinity) && worst !== "CRITICAL_FAILURE") {
+      worst = "WARNING";
+      explanation = `${c.param} is approaching its critical limit (${c.criticalThreshold}). ${c.explanation || ""}`;
+    }
+  }
+  return { state: worst, explanation, fixedParams: simConfig?.optimalParams || {} };
+}
+
+function buildAutoFixText(editorText, fixedParams) {
+  // Replace each param line with fixed value
+  let result = editorText;
+  for (const [key, val] of Object.entries(fixedParams)) {
+    result = result.replace(
+      new RegExp(`^(\\s*${key}\\s*=\\s*)([\\d.+-]+)(\\s*.*)$`, "m"),
+      `$1${val}$3`
+    );
+  }
+  return result;
+}
+
+// ── main component ─────────────────────────────────────────────────────────
+
+export default function PhysicsEditorPage() {
   const updateFromStorage = useLoominStore((s) => s.updateFromStorage);
   const hasUpdated = useLoominStore((s) => s.hasUpdated);
   const journals = useLoominStore((s) => s.journals);
   const activeId = useLoominStore((s) => s.activeId);
   const setEditorValue = useLoominStore((s) => s.setEditorValue);
   const setVars = useLoominStore((s) => s.setVars);
+  const setSimConfig = useLoominStore((s) => s.setSimConfig);
+  const createJournal = useLoominStore((s) => s.createJournal);
 
-  const [navOpen, setNavOpen] = useState(false);
-
-  const active = useMemo(() => journals.find((j) => j.id === activeId) || journals[0], [journals, activeId]);
+  const active = useMemo(
+    () => journals.find((j) => j.id === activeId) || journals[0],
+    [journals, activeId]
+  );
   const editorValue = active?.editorValue ?? "";
   const vars = active?.vars ?? {};
-  const rotationSpeed = useMemo(() => computeRotationSpeed(vars || {}), [vars]);
+  const simConfig = active?.simConfig ?? null;
+
+  const [navOpen, setNavOpen] = useState(false);
+  const [topicInput, setTopicInput] = useState("");
+  const [streaming, setStreaming] = useState(false);
+  const [askDrawerOpen, setAskDrawerOpen] = useState(false);
+  const [physicsState, setPhysicsState] = useState({ state: "OPTIMAL", explanation: "", fixedParams: {} });
 
   const debouncedRef = useRef(null);
 
-  useEffect(() => {
-    updateFromStorage();
-  }, [updateFromStorage]);
+  useEffect(() => { updateFromStorage(); }, [updateFromStorage]);
 
+  // Re-validate on vars / simConfig change
+  useEffect(() => {
+    setPhysicsState(validatePhysics(simConfig, vars));
+  }, [vars, simConfig]);
+
+  // Re-parse vars when active journal switches
+  useEffect(() => {
+    if (!hasUpdated) return;
+    const parsed = parseParams(editorValue);
+    setVars(parsed);
+  }, [hasUpdated, activeId]);
+
+  // Debounced editor change handler
   const onEditorChange = useMemo(() => {
     const handler = (value) => {
       const v = value ?? "";
       setEditorValue(v);
-      setVars(extractKeyValuePairs(v));
+      const parsed = parseParams(v);
+      setVars(parsed);
     };
-    debouncedRef.current = debounce(handler, 220);
+    debouncedRef.current = debounce(handler, 150);
     return (value) => debouncedRef.current?.(value);
   }, [setEditorValue, setVars]);
 
-  useEffect(() => {
-    if (!hasUpdated) return;
-    setVars(extractKeyValuePairs(editorValue));
-  }, [hasUpdated, activeId]);
+  // Stream notes from /api/sim-notes (thinking model)
+  const generateNotes = useCallback(async () => {
+    const topic = topicInput.trim();
+    if (!topic || streaming) return;
+    setStreaming(true);
+    setEditorValue(`## Generating: ${topic}\n\n_Streaming physics notes…_\n`);
+
+    try {
+      const res = await fetch("/api/sim-notes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic }),
+      });
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let fullText = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        fullText += chunk;
+
+        // Display text minus the SIMCONFIG block
+        const displayText = fullText
+          .replace(/<SIMCONFIG>[\s\S]*?<\/SIMCONFIG>/g, "")
+          .trimEnd();
+        setEditorValue(displayText);
+      }
+
+      // Parse SIMCONFIG from full stream
+      const config = parseSIMCONFIG(fullText);
+      if (config) {
+        setSimConfig(config);
+        // Set initial params from simConfig defaults
+        const initialVars = {};
+        for (const p of config.params || []) {
+          initialVars[p.name] = p.default;
+        }
+        setVars(initialVars);
+      }
+
+      // Final parse of params from display text
+      const finalDisplay = fullText.replace(/<SIMCONFIG>[\s\S]*?<\/SIMCONFIG>/g, "").trimEnd();
+      const parsedVars = parseParams(finalDisplay);
+      if (Object.keys(parsedVars).length > 0) setVars(parsedVars);
+
+    } catch (err) {
+      console.error("generateNotes error:", err);
+      setEditorValue(`## Error\nFailed to generate notes. Please try again.`);
+    } finally {
+      setStreaming(false);
+      setTopicInput("");
+    }
+  }, [topicInput, streaming, setEditorValue, setVars, setSimConfig]);
+
+  // AUTO-FIX: reset params to optimal, rewrite editor
+  const handleAutoFix = useCallback(() => {
+    const fixed = physicsState.fixedParams;
+    if (!fixed || !Object.keys(fixed).length) return;
+    const newText = buildAutoFixText(editorValue, fixed);
+    setEditorValue(newText);
+    const parsed = parseParams(newText);
+    setVars(parsed);
+  }, [physicsState.fixedParams, editorValue, setEditorValue, setVars]);
+
+  // Derive live indicator
+  const liveOk = physicsState.state !== "CRITICAL_FAILURE";
+  const simType = simConfig?.simType || null;
 
   return (
     <div className="h-[100vh] overflow-hidden bg-[#070A0F] text-white selection:bg-white/20">
       <style>{`
         .loomin-scroll{scrollbar-gutter:stable}
-        .loomin-scroll::-webkit-scrollbar{width:10px}
-        .loomin-scroll::-webkit-scrollbar-track{background:rgba(255,255,255,0.04);border-radius:999px}
-        .loomin-scroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.14);border:2px solid rgba(0,0,0,0);background-clip:padding-box;border-radius:999px}
-        .loomin-scroll::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,0.20);border:2px solid rgba(0,0,0,0);background-clip:padding-box}
+        .loomin-scroll::-webkit-scrollbar{width:8px}
+        .loomin-scroll::-webkit-scrollbar-track{background:rgba(255,255,255,0.03);border-radius:999px}
+        .loomin-scroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border:2px solid rgba(0,0,0,0);background-clip:padding-box;border-radius:999px}
+        .loomin-scroll::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,0.18)}
       `}</style>
 
-      <div
-        className="pointer-events-none fixed inset-0 opacity-[0.65]"
-        style={{
-          background:
-            "radial-gradient(1200px 600px at 70% 20%, rgba(99,102,241,0.22), transparent 55%), radial-gradient(900px 520px at 20% 80%, rgba(16,185,129,0.16), transparent 58%), radial-gradient(700px 420px at 35% 30%, rgba(236,72,153,0.10), transparent 60%)",
-        }}
-      />
-      <div className="pointer-events-none fixed inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.05)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.05)_1px,transparent_1px)] bg-[size:42px_42px] opacity-[0.08]" />
+      {/* Background */}
+      <div className="pointer-events-none fixed inset-0 opacity-[0.65]" style={{
+        background: "radial-gradient(1200px 600px at 70% 20%, rgba(99,102,241,0.22), transparent 55%), radial-gradient(900px 520px at 20% 80%, rgba(16,185,129,0.16), transparent 58%)",
+      }} />
+      <div className="pointer-events-none fixed inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.05)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.05)_1px,transparent_1px)] bg-[size:42px_42px] opacity-[0.05]" />
 
-      <div className="relative mx-auto h-full max-w-[1400px] px-4 py-4 grid grid-cols-[280px,1fr] gap-4">
-        <JournalsNav open={navOpen} onToggle={() => setNavOpen((v) => !v)} />
+      <div className="relative mx-auto h-full max-w-[1440px] px-4 py-4 grid grid-cols-[260px,1fr] gap-4">
+        {/* Left sidebar — journals */}
+        <JournalsNav
+          open={navOpen}
+          onToggle={() => setNavOpen((v) => !v)}
+          onNewJournal={() => createJournal(`Session ${journals.length + 1}`)}
+        />
 
+        {/* Main area */}
         <div className="min-h-0 grid grid-rows-[auto,1fr] gap-4">
+          {/* Navbar */}
           <header className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="h-9 w-9 rounded-xl bg-white/10 ring-1 ring-white/15 backdrop-blur-md flex items-center justify-center">
-                <div className="h-4 w-4 rounded-sm bg-gradient-to-br from-indigo-400 via-fuchsia-300 to-emerald-300 opacity-95" />
+                <div className="h-4 w-4 rounded-sm bg-gradient-to-br from-indigo-400 via-fuchsia-300 to-emerald-300" />
               </div>
               <div className="leading-tight">
-                <div className="text-sm tracking-[0.18em] uppercase text-white/55">Loomin</div>
-                <div className="text-[15px] font-semibold text-white/92">{active?.name ?? "Journal"}</div>
+                <div className="text-[10px] tracking-[0.18em] uppercase text-white/45">Loomin</div>
+                <div className="text-[15px] font-semibold text-white/92">{active?.name ?? "Physics Sandbox"}</div>
               </div>
             </div>
 
-            <div className="hidden md:flex items-center gap-2 rounded-2xl bg-white/6 ring-1 ring-white/12 px-3 py-2 backdrop-blur-md">
-              <div className="h-2 w-2 rounded-full bg-emerald-400/90 shadow-[0_0_18px_rgba(52,211,153,0.55)]" />
-              <div className="text-xs text-white/65">Live sync</div>
-              <div className="ml-3 text-xs text-white/55">Wind_Speed</div>
-              <div className="text-xs font-semibold text-white/85">{typeof vars?.Wind_Speed === "number" ? vars.Wind_Speed : "—"}</div>
-              <div className="ml-3 text-xs text-white/55">rotationSpeed</div>
-              <div className="text-xs font-semibold text-white/85">{Number.isFinite(rotationSpeed) ? rotationSpeed.toFixed(2) : "0.00"}</div>
+            <div className="flex items-center gap-2">
+              {/* Live indicator */}
+              <div className={`flex items-center gap-2 px-3 py-1.5 rounded-xl ring-1 backdrop-blur-md ${liveOk ? "bg-emerald-950/60 ring-emerald-500/30" : "bg-red-950/60 ring-red-500/30"}`}>
+                <div className={`h-2 w-2 rounded-full ${liveOk ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)] animate-pulse" : "bg-red-400 shadow-[0_0_8px_rgba(239,68,68,0.8)] animate-pulse"}`} />
+                <span className={`text-xs font-mono font-semibold ${liveOk ? "text-emerald-400" : "text-red-400"}`}>
+                  {liveOk ? "LIVE" : "ERROR"}
+                </span>
+              </div>
+
+              {/* System status */}
+              <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl ring-1 backdrop-blur-md ${liveOk ? "bg-white/5 ring-white/10" : "bg-red-950/40 ring-red-500/20"}`}>
+                {liveOk
+                  ? <CheckCircle className="h-3.5 w-3.5 text-emerald-400" />
+                  : <AlertTriangle className="h-3.5 w-3.5 text-red-400" />}
+                <span className={`text-xs ${liveOk ? "text-white/60" : "text-red-300"}`}>
+                  {liveOk ? "System Ready" : "Error Detected"}
+                </span>
+              </div>
+
+              {/* Ask AI button */}
+              <button
+                onClick={() => setAskDrawerOpen(true)}
+                className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-indigo-500/15 ring-1 ring-indigo-500/30 hover:bg-indigo-500/25 transition text-xs font-semibold text-indigo-300"
+              >
+                <Brain className="h-3.5 w-3.5" />
+                Ask AI
+              </button>
             </div>
           </header>
 
+          {/* Content grid */}
           <div className="min-h-0 grid grid-cols-12 gap-4">
-            <motion.section initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }} className="min-h-0 col-span-12 lg:col-span-4">
-              <div className="h-full min-h-0 grid grid-rows-[0.92fr,1.08fr] gap-4">
-                <div className="min-h-0 rounded-3xl bg-white/[0.055] ring-1 ring-white/12 backdrop-blur-xl shadow-[0_0_0_1px_rgba(255,255,255,0.04),0_30px_90px_rgba(0,0,0,0.55)] overflow-hidden grid grid-rows-[auto,1fr]">
-                  <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
-                    <div className="text-sm font-semibold text-white/90">Lecture</div>
-                    <div className="text-xs text-white/55">Top-left</div>
+            {/* Left panel */}
+            <motion.section
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+              className="min-h-0 col-span-12 lg:col-span-4 grid grid-rows-[1fr] gap-0"
+            >
+              <div className="min-h-0 rounded-3xl bg-white/[0.05] ring-1 ring-white/12 backdrop-blur-xl overflow-hidden flex flex-col">
+                {/* Topic input bar */}
+                <div className="flex-shrink-0 px-4 py-3 border-b border-white/10">
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5 flex-shrink-0">
+                      <Sparkles className="h-3.5 w-3.5 text-indigo-400" />
+                      <span className="text-xs font-semibold text-white/70">Topic</span>
+                    </div>
+                    <input
+                      value={topicInput}
+                      onChange={(e) => setTopicInput(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && generateNotes()}
+                      placeholder="e.g. pendulum, wind turbine, projectile…"
+                      disabled={streaming}
+                      className="flex-1 bg-white/5 rounded-lg px-3 py-1.5 text-xs text-white/90 placeholder:text-white/30 outline-none ring-1 ring-white/10 focus:ring-indigo-500/50 transition disabled:opacity-50"
+                    />
+                    <button
+                      onClick={generateNotes}
+                      disabled={streaming || !topicInput.trim()}
+                      className="h-8 w-8 rounded-lg bg-indigo-500/20 ring-1 ring-indigo-500/30 hover:bg-indigo-500/30 disabled:opacity-40 disabled:cursor-not-allowed transition flex items-center justify-center flex-shrink-0"
+                    >
+                      {streaming ? (
+                        <Loader2 className="h-3.5 w-3.5 text-indigo-400 animate-spin" />
+                      ) : (
+                        <Send className="h-3.5 w-3.5 text-indigo-400" />
+                      )}
+                    </button>
                   </div>
-                  <div className="min-h-0 p-3">
-                    <div className="relative h-full rounded-2xl overflow-hidden bg-black/50 ring-1 ring-white/10">
-                      <video className="h-full w-full object-cover opacity-95" controls playsInline src="/video/lecture.mp4" />
-                      <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/35 via-transparent to-black/10" />
+
+                  {/* Model indicator */}
+                  <div className="flex items-center gap-3 mt-2">
+                    <div className="flex items-center gap-1.5">
+                      <Brain className="h-3 w-3 text-violet-400" />
+                      <span className="text-[10px] text-white/40">Thinking: llama-3.3-70b</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Zap className="h-3 w-3 text-amber-400" />
+                      <span className="text-[10px] text-white/40">Fast: llama-3.1-8b</span>
                     </div>
                   </div>
                 </div>
 
-                <div className="min-h-0 rounded-3xl bg-white/[0.055] ring-1 ring-white/12 backdrop-blur-xl shadow-[0_0_0_1px_rgba(255,255,255,0.04),0_30px_90px_rgba(0,0,0,0.55)] overflow-hidden grid grid-rows-[auto,1fr]">
-                  <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
-                    <div className="text-sm font-semibold text-white/90">Editor</div>
-                    <div className="text-xs text-white/55">Bottom-left</div>
-                  </div>
-                  <div className="min-h-0 p-2">
-                    <div className="h-full overflow-hidden rounded-2xl ring-1 ring-white/10 bg-[#0B1020]/70">
-                      <Monaco
-                        theme="vs-dark"
-                        language="plaintext"
-                        value={editorValue}
-                        onChange={onEditorChange}
-                        options={{
-                          minimap: { enabled: false },
-                          fontSize: 13,
-                          lineHeight: 20,
-                          padding: { top: 14, bottom: 14 },
-                          renderLineHighlight: "gutter",
-                          scrollBeyondLastLine: false,
-                          smoothScrolling: true,
-                          cursorSmoothCaretAnimation: "on",
-                          fontLigatures: true,
-                          bracketPairColorization: { enabled: true },
-                        }}
-                      />
-                    </div>
-                  </div>
+                {/* Streaming indicator */}
+                <AnimatePresence>
+                  {streaming && (
+                    <motion.div
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: "auto", opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      className="flex-shrink-0 overflow-hidden"
+                    >
+                      <div className="px-4 py-2 bg-indigo-950/40 border-b border-indigo-500/20 flex items-center gap-2">
+                        <div className="flex gap-0.5">
+                          {[0, 1, 2].map((i) => (
+                            <motion.div
+                              key={i}
+                              animate={{ opacity: [0.3, 1, 0.3] }}
+                              transition={{ duration: 1.2, repeat: Infinity, delay: i * 0.2 }}
+                              className="w-1 h-1 rounded-full bg-indigo-400"
+                            />
+                          ))}
+                        </div>
+                        <span className="text-[11px] text-indigo-300/80">Generating physics notes…</span>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
+                {/* Monaco editor */}
+                <div className="flex-1 min-h-0">
+                  <Monaco
+                    theme="vs-dark"
+                    language="markdown"
+                    value={editorValue}
+                    onChange={onEditorChange}
+                    options={{
+                      minimap: { enabled: false },
+                      fontSize: 12,
+                      lineHeight: 19,
+                      padding: { top: 12, bottom: 12 },
+                      renderLineHighlight: "gutter",
+                      scrollBeyondLastLine: false,
+                      smoothScrolling: true,
+                      cursorSmoothCaretAnimation: "on",
+                      wordWrap: "on",
+                    }}
+                  />
                 </div>
+
+                {/* Params summary bar */}
+                {simConfig && (
+                  <div className="flex-shrink-0 border-t border-white/8 px-4 py-2 flex items-center gap-3 overflow-x-auto">
+                    {(simConfig.params || []).slice(0, 4).map((p) => (
+                      <div key={p.name} className="flex items-center gap-1.5 flex-shrink-0">
+                        <span className="text-[10px] text-white/40">{p.label || p.name}</span>
+                        <span className="text-[10px] font-mono font-bold text-cyan-400">
+                          {vars[p.name] ?? p.default}
+                        </span>
+                        <span className="text-[10px] text-white/30">{p.unit}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </motion.section>
 
-            <motion.section initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.04, duration: 0.5, ease: [0.22, 1, 0.36, 1] }} className="min-h-0 col-span-12 lg:col-span-8">
-              <div className="h-full min-h-0 rounded-3xl bg-white/[0.055] ring-1 ring-white/12 backdrop-blur-xl shadow-[0_0_0_1px_rgba(255,255,255,0.04),0_30px_90px_rgba(0,0,0,0.55)] overflow-hidden grid grid-rows-[auto,1fr]">
+            {/* Right panel — 3D Sandbox */}
+            <motion.section
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.05, duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+              className="min-h-0 col-span-12 lg:col-span-8"
+            >
+              <div className="h-full min-h-0 rounded-3xl bg-white/[0.05] ring-1 ring-white/12 backdrop-blur-xl overflow-hidden grid grid-rows-[auto,1fr]">
                 <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
                   <div className="flex items-center gap-3">
                     <div className="text-sm font-semibold text-white/90">3D Sandbox</div>
+                    <div className="px-2 py-0.5 rounded-md bg-white/8 text-[10px] text-white/50 font-mono">
+                      {simConfig?.displayName || simType || "No simulation"}
+                    </div>
                   </div>
-                  <div className="text-xs text-white/55">Right column</div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-white/40">Interactive · Drag to orbit</span>
+                  </div>
                 </div>
 
-                <div className="relative min-h-0">
-                  <Scene />
-                  <div className="pointer-events-none absolute right-4 top-4 flex items-center gap-2 rounded-2xl bg-white/10 ring-1 ring-white/15 px-3 py-2 backdrop-blur-xl">
-                    <Leaf className="h-4 w-4 text-emerald-300/90" />
-                    <div className="text-xs font-semibold text-white/85">Sustainability</div>
-                  </div>
+                <div className="relative min-h-0 bg-[#050810]">
+                  <PhysicsScene
+                    simType={simType}
+                    params={vars}
+                    simConfig={simConfig}
+                  />
+
+                  {/* Status card overlay */}
+                  <AnimatePresence mode="wait">
+                    <StatusCard
+                      key={physicsState.state}
+                      physicsState={physicsState}
+                      onAutoFix={handleAutoFix}
+                    />
+                  </AnimatePresence>
                 </div>
               </div>
             </motion.section>
           </div>
         </div>
       </div>
+
+      {/* Ask AI Drawer */}
+      <AskAIDrawer
+        open={askDrawerOpen}
+        onClose={() => setAskDrawerOpen(false)}
+        simConfig={simConfig}
+        currentParams={vars}
+      />
     </div>
   );
 }

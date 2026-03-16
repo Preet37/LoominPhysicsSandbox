@@ -1,7 +1,16 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
+const auth0Configured =
+  typeof process.env.AUTH0_ISSUER_BASE_URL === 'string' &&
+  process.env.AUTH0_ISSUER_BASE_URL.length > 0;
+
 export function middleware(request: NextRequest) {
+  // When Auth0 is not configured, allow access everywhere (for local testing)
+  if (!auth0Configured) {
+    return NextResponse.next();
+  }
+
   // Check for auth session cookie
   const sessionCookie = request.cookies.get('appSession');
   const isAuthenticated = !!sessionCookie;
@@ -19,7 +28,7 @@ export function middleware(request: NextRequest) {
       return NextResponse.redirect(new URL('/api/auth/login', request.url));
     }
   }
-  
+
   return NextResponse.next();
 }
 

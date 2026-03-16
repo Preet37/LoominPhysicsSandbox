@@ -74,12 +74,14 @@ export default function LandingPage() {
             <span className="text-lg font-semibold tracking-tight">Loomin</span>
           </div>
           
-          <a 
-            href="/api/auth/login?returnTo=/dashboard"
-            className="px-5 py-2 rounded-lg bg-white/10 hover:bg-white/20 border border-white/10 hover:border-white/20 text-sm font-medium transition-all"
-          >
-            Log In
-          </a>
+          <div className="flex items-center gap-3">
+            <a 
+              href="/editor"
+              className="px-5 py-2 rounded-lg bg-gradient-to-r from-indigo-600 to-emerald-600 hover:from-indigo-500 hover:to-emerald-500 text-sm font-semibold transition-all shadow-lg shadow-indigo-500/20"
+            >
+              Launch Sandbox →
+            </a>
+          </div>
         </div>
       </nav>
 
@@ -117,8 +119,7 @@ export default function LandingPage() {
             transition={{ delay: 3, duration: 0.8 }}
             className="text-lg md:text-xl text-white/50 max-w-2xl mx-auto mb-12"
           >
-            Transform your notes into interactive 3D simulations. 
-            Learn complex concepts through AI-powered visualizations and smart flashcards.
+            Type any physics topic. Watch AI generate notes, equations, and a live 3D simulation — then push parameters to their limits and see what breaks.
           </motion.p>
 
           {/* CTA Button */}
@@ -128,10 +129,10 @@ export default function LandingPage() {
             transition={{ delay: 3.5, duration: 0.5 }}
           >
             <a
-              href="/api/auth/login?returnTo=/dashboard"
+              href="/editor"
               className="group relative inline-flex items-center gap-3 px-8 py-4 rounded-xl bg-gradient-to-r from-indigo-600 to-emerald-600 hover:from-indigo-500 hover:to-emerald-500 text-lg font-semibold transition-all duration-300 shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:shadow-indigo-500/30"
             >
-              <span>TRY LOOMIN</span>
+              <span>Launch Physics Sandbox</span>
               <motion.span
                 animate={{ x: [0, 5, 0] }}
                 transition={{ duration: 1.5, repeat: Infinity }}
@@ -504,10 +505,10 @@ export default function LandingPage() {
               Join Loomin today and experience the future of interactive education.
             </p>
             <a
-              href="/api/auth/login?returnTo=/dashboard"
+              href="/editor"
               className="group relative inline-flex items-center gap-3 px-10 py-5 rounded-xl bg-gradient-to-r from-indigo-600 to-emerald-600 hover:from-indigo-500 hover:to-emerald-500 text-xl font-semibold transition-all duration-300 shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:shadow-indigo-500/30"
             >
-              <span>Get Started Free</span>
+              <span>Launch Physics Sandbox</span>
               <motion.span
                 animate={{ x: [0, 5, 0] }}
                 transition={{ duration: 1.5, repeat: Infinity }}
