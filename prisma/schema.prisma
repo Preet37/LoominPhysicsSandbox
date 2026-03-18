@@ -1,0 +1,27 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+// THE SHARED BRAIN (Cache)
+model SimulationCache {
+  id        String   @id @default(cuid())
+  prompt    String   @unique
+  result    String
+  createdAt DateTime @default(now())
+}
+// ... (SimulationCache is above this)
+
+model Note {
+  id        String   @id @default(cuid())
+  title     String
+  content   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

@@ -1,0 +1,39 @@
+{
+  "name": "loomin",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "prisma generate && next build",
+    "postinstall": "prisma generate",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@ai-sdk/groq": "^3.0.10",
+    "@auth0/nextjs-auth0": "^3.8.0",
+    "@google/generative-ai": "^0.24.1",
+    "@monaco-editor/react": "^4.7.0",
+    "@prisma/client": "^5.0.0",
+    "@react-three/drei": "^9.122.0",
+    "@react-three/fiber": "^8.18.0",
+    "@types/three": "^0.160.0",
+    "clsx": "^2.1.1",
+    "framer-motion": "^11.18.2",
+    "groq-sdk": "^0.3.0",
+    "lucide-react": "^0.562.0",
+    "next": "^14.2.3",
+    "prisma": "^5.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwind-merge": "^2.6.0",
+    "three": "^0.163.0",
+    "zustand": "^5.0.10"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.23",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.19",
+    "typescript": "5.9.3"
+  }
+}
