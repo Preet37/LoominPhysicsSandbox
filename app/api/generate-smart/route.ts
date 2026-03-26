@@ -8,7 +8,7 @@ import Groq from 'groq-sdk';
 // 4. Verify with Gemini VLM
 // 5. Iterate until correct
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY || 'missing_groq_key' });
 const GEMINI_KEY = process.env.GOOGLE_API_KEY;
 
 export async function POST(req: Request) {

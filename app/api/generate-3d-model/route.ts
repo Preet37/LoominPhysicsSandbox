@@ -4,7 +4,7 @@ import Groq from 'groq-sdk';
 // AI-POWERED 3D MODEL GENERATION
 // Generates detailed 3D model specifications for ANY topic
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY || 'missing_groq_key' });
 
 export async function POST(req: Request) {
   try {

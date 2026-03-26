@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import Groq from 'groq-sdk';
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY || 'missing_groq_key' });
 
 const NVIDIA_BASE    = 'https://integrate.api.nvidia.com/v1';
 const NVIDIA_FAST    = 'nvidia/llama-3.1-nemotron-nano-8b-v1';
