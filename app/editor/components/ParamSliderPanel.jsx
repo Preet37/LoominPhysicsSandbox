@@ -1,5 +1,7 @@
 "use client";
 
+import { useEffect, useState } from "react";
+
 // Detects whether a param should snap to integers
 // (all of min/max/default are whole numbers and name suggests a count/integer)
 function isIntegerParam(param) {
@@ -35,6 +37,13 @@ function SingleSlider({ param, rawValue, onCommit }) {
     ? rawValue
     : rawValue.toFixed(2);
 
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(String(displayVal));
+
+  useEffect(() => {
+    if (!editing) setDraft(String(displayVal));
+  }, [editing, displayVal]);
+
   return (
     <div className="flex items-center gap-3 group">
       <span className="text-[11px] text-white/50 w-24 truncate flex-shrink-0">
@@ -65,9 +74,44 @@ function SingleSlider({ param, rawValue, onCommit }) {
 
       {/* Value label */}
       <div className="flex-shrink-0 text-right w-20">
-        <span className={`text-[11px] font-mono font-semibold ${isOver ? "text-red-300" : "text-cyan-300"}`}>
-          {displayVal}
-        </span>
+        {editing ? (
+          <input
+            type="number"
+            step={isInt ? 1 : step}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            autoFocus
+            onBlur={() => {
+              const num = Number(draft);
+              if (Number.isFinite(num)) {
+                const v = isInt ? Math.round(num) : num;
+                onCommit(param.name, v);
+              }
+              setEditing(false);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.currentTarget.blur();
+              } else if (e.key === "Escape") {
+                setEditing(false);
+                setDraft(String(displayVal));
+              }
+            }}
+            className="w-full rounded-lg border border-white/15 bg-[#0b1220] px-2 py-1 text-[11px] font-mono text-white/90 outline-none focus:ring-1 focus:ring-indigo-500/60"
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={() => {
+              setEditing(true);
+              setDraft(String(displayVal));
+            }}
+            className={`text-[11px] font-mono font-semibold ${isOver ? "text-red-300" : "text-cyan-300"} hover:opacity-90 transition`}
+            title="Click to edit value"
+          >
+            {displayVal}
+          </button>
+        )}
         {param.unit && (
           <span className="text-[10px] text-white/30 ml-1">{param.unit}</span>
         )}
