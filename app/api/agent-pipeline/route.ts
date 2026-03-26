@@ -98,14 +98,16 @@ function buildDesignPrompt(brief: string, simType: string, isFast: boolean): str
 ## Wind Turbine
 
 ### Introduction
-Brief overview.
+5-7 sentences. Include physical intuition + 2 concrete real-world numbers.
 
 ### Key Physics Concepts
-- Key equation (plain text, no LaTeX)
+- At least 6 bullet points
+- Use proper LaTeX math formatting for equations with \\( ... \\) inline and \\[ ... \\] for display equations
+- Include at least 4 equations
 
 ### Real-World Applications & Failure Modes
-- Application
-- Failure mode
+- At least 3 real applications
+- At least 3 failure modes, each with a physics reason
 
 ---
 ### Interactive Simulation
@@ -130,6 +132,7 @@ The above is an EXAMPLE for wind turbines. Now generate the same format for the 
 - Param names in the parameter block must exactly match param names in the SIMCONFIG
 - All warningThreshold and criticalThreshold values must be strictly greater than the default value
 - The SIMCONFIG "simType" MUST be exactly "${simType}" — do NOT change it
+- Make notes deep (not shallow): minimum 500 words before <SIMCONFIG>
 - Do not output any explanation of these rules
 
 Sim type: ${simType}
@@ -161,13 +164,20 @@ STRICT OUTPUT FORMAT — start immediately with markdown, no preamble:
 ## [Topic Name]
 
 ### Introduction
-2-3 sentences using real specs from the research brief.
+Write 6-8 sentences using real specs from the research brief. Explain what physically causes behavior, not just what happens.
 
 ### Key Physics Concepts
-Bullet points with plain-text equations. Example: F = ma, P = 0.5ρAv³Cp
+Provide at least 7 bullet points. Include at least 5 equations with proper LaTeX:
+- inline equations: \\( ... \\)
+- display equations: \\[ ... \\]
+For each equation, define variables and explain physical meaning in plain language.
 
 ### Real-World Applications & Failure Modes
-Use the specific failure modes and thresholds from the research brief.
+Use specific failure modes and thresholds from the research brief.
+Include at least 4 failure modes, each with:
+- trigger condition
+- what physically fails
+- real-world consequence
 
 ---
 ### Interactive Simulation
