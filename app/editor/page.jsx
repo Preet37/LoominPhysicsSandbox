@@ -473,7 +473,7 @@ export default function PhysicsEditorPage() {
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-                className="min-h-0 flex-1 overflow-hidden"
+                className="min-h-0 flex-1 overflow-hidden relative z-20"
               >
               <div className="min-h-0 rounded-3xl bg-white/[0.05] ring-1 ring-white/12 backdrop-blur-xl overflow-hidden flex flex-col">
                 {/* Topic input bar */}
@@ -606,7 +606,7 @@ export default function PhysicsEditorPage() {
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: 0.02, duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-                className="min-h-0 flex-1 overflow-hidden"
+                className="min-h-0 flex-1 overflow-hidden relative z-0"
               >
               <div className="h-full min-h-0 rounded-3xl bg-white/[0.05] ring-1 ring-white/12 backdrop-blur-xl overflow-hidden grid grid-rows-[auto,1fr]">
                 {/* Sandbox header */}
