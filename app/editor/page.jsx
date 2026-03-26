@@ -475,7 +475,7 @@ export default function PhysicsEditorPage() {
                 transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
                 className="min-h-0 flex-1 overflow-hidden relative z-20"
               >
-              <div className="min-h-0 rounded-3xl bg-white/[0.05] ring-1 ring-white/12 backdrop-blur-xl overflow-hidden flex flex-col">
+              <div className="h-full min-h-0 rounded-3xl bg-white/[0.05] ring-1 ring-white/12 backdrop-blur-xl overflow-hidden flex flex-col">
                 {/* Topic input bar */}
                 <div className="flex-shrink-0 px-4 py-3 border-b border-white/10">
                   <div className="flex items-center gap-2">
