@@ -96,7 +96,7 @@ export default function InteractiveNotesSurface({ value = "", onChange, currentP
   };
 
   return (
-    <div className="flex-1 min-h-0 overflow-y-scroll loomin-scroll px-4 py-4">
+    <div className="h-full min-h-0 overflow-y-scroll loomin-scroll px-4 py-4">
 
       {/* ── Content Blocks ── */}
       <div className="space-y-2.5">
