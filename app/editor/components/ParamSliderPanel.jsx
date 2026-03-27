@@ -35,28 +35,30 @@ function SingleSlider({ param, rawValue, onCommit }) {
   const isInt = isIntegerParam(param);
   const step = isInt ? 1 : (param.max - param.min) / 300;
 
-  // Local value updates immediately on any interaction so the display is
-  // always in sync. It syncs from the prop only when the prop changes AND
-  // we are not currently interacting (i.e. an external edit came in).
+  // `localValue` is used ONLY to drive the range track position during an
+  // active drag so the thumb moves smoothly without waiting for the store
+  // round-trip.  The displayed number and fill-bar ALWAYS read from `rawValue`
+  // (the prop) so they stay honest with what the store actually contains —
+  // this prevents the "shows 146 after auto-fix" stale-display bug.
   const [localValue, setLocalValue] = useState(rawValue);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
-  const interacting = editing;
 
+  // Keep localValue in sync whenever the store value changes externally
+  // (auto-fix, journal switch, note edit, etc.).
   useEffect(() => {
-    if (!interacting) {
-      setLocalValue(rawValue);
-    }
-  }, [rawValue]); // eslint-disable-line react-hooks/exhaustive-deps
+    setLocalValue(rawValue);
+  }, [rawValue]);
 
-  const displayVal = fmt(localValue, isInt);
-  const pct = ((localValue - param.min) / (param.max - param.min)) * 100;
+  // Display always comes from the authoritative prop, not localValue.
+  const displayVal = fmt(rawValue, isInt);
+  const pct = ((rawValue - param.min) / (param.max - param.min)) * 100;
   const fillPct = Math.min(100, Math.max(0, pct));
-  const isOver = localValue > param.max;
+  const isOver = rawValue > param.max;
 
   const commit = (v) => {
     const clamped = isInt ? Math.round(v) : v;
-    setLocalValue(clamped);
+    setLocalValue(clamped);   // instant visual feedback on the track
     onCommit(param.name, clamped);
   };
 
