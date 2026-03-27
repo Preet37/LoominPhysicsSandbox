@@ -194,6 +194,17 @@ function validatePhysics(simConfig, params) {
   return { state: worst, explanation, fixedParams: simConfig?.optimalParams || {} };
 }
 
+// Case-insensitive lookup through an object — handles AI key casing inconsistency
+function findByKey(obj, key) {
+  if (!obj) return undefined;
+  if (obj[key] !== undefined) return obj[key];
+  const lower = key.toLowerCase();
+  for (const [k, v] of Object.entries(obj)) {
+    if (k.toLowerCase() === lower) return v;
+  }
+  return undefined;
+}
+
 // Only fix the params that are actually violating constraints — don't reset unrelated ones
 function patchParamFlexible(text, paramName, newValue) {
   // Match Wind_Speed / WIND_SPEED / Wind Speed / WIND SPEED, etc.
@@ -206,15 +217,14 @@ function buildAutoFixText(editorText, simConfig, currentParams) {
   let result = editorText;
   for (const constraint of simConfig?.constraints || []) {
     const normKey = normalizeKey(constraint.param);
-    const val = currentParams[normKey] ?? currentParams[constraint.param];
+    const val = currentParams[normKey] ?? findByKey(currentParams, constraint.param);
     if (val === undefined) continue;
-    // Only touch this param if it's actually at or above the warning threshold
     if (val >= (constraint.warningThreshold ?? Infinity)) {
-      const optimalVal = simConfig?.optimalParams?.[constraint.param]
-        ?? simConfig?.optimalParams?.[normKey];
+      // Case-insensitive lookup in optimalParams, then fall back to param default
+      const optimalVal = findByKey(simConfig?.optimalParams, constraint.param)
+        ?? findByKey(simConfig?.optimalParams, normKey)
+        ?? simConfig?.params?.find(p => normalizeKey(p.name) === normKey)?.default;
       if (optimalVal !== undefined) {
-        // Patch both constraint.param and normKey forms (some notes use WIND_SPEED,
-        // others use Wind_Speed; some use spaces instead of underscores).
         const before = result;
         result = patchParamFlexible(result, constraint.param, optimalVal);
         if (result === before) result = patchParamFlexible(result, normKey, optimalVal);
@@ -394,21 +404,28 @@ export default function PhysicsEditorPage() {
   // AUTO-FIX: only fix violated params, leave the rest (e.g. keep user's blade count)
   const handleAutoFix = useCallback(() => {
     if (!simConfig) return;
-    // 1) Patch the editor text (best-effort) so notes stay consistent.
+    // 1) Patch the editor text so the notes stay consistent.
     const newText = buildAutoFixText(editorValue, simConfig, vars);
     setEditorValue(newText);
 
-    // 2) Deterministically update the sandbox params even if the editor text
-    // formatting is weird (spaces/underscores/casing).
+    // 2) Directly write the fixed values into vars regardless of text formatting.
+    //    Use case-insensitive lookup so AI key-casing inconsistencies are handled.
     const nextVars = { ...vars };
     for (const constraint of simConfig?.constraints || []) {
       const normKey = normalizeKey(constraint.param);
-      const val = vars[normKey] ?? vars[constraint.param];
+      const val = vars[normKey] ?? findByKey(vars, constraint.param);
       if (val === undefined) continue;
       if (val >= (constraint.warningThreshold ?? Infinity)) {
-        const optimalVal = simConfig?.optimalParams?.[constraint.param]
-          ?? simConfig?.optimalParams?.[normKey];
-        if (optimalVal !== undefined) nextVars[normKey] = optimalVal;
+        const optimalVal =
+          findByKey(simConfig?.optimalParams, constraint.param) ??
+          findByKey(simConfig?.optimalParams, normKey) ??
+          simConfig?.params?.find(p => normalizeKey(p.name) === normKey)?.default;
+        if (optimalVal !== undefined) {
+          // Write under the normalized key AND the original key so every
+          // possible lookup path finds the corrected value.
+          nextVars[normKey] = optimalVal;
+          nextVars[constraint.param] = optimalVal;
+        }
       }
     }
     setVars(nextVars);

@@ -2,6 +2,16 @@
 
 import { useEffect, useState } from "react";
 
+// Case-insensitive lookup so Wind_Speed / WIND_SPEED / wind_speed all resolve
+function getParamValue(currentParams, name) {
+  if (currentParams[name] !== undefined) return currentParams[name];
+  const lower = name.toLowerCase();
+  for (const [k, v] of Object.entries(currentParams)) {
+    if (k.toLowerCase() === lower) return v;
+  }
+  return undefined;
+}
+
 // Detects whether a param should snap to integers
 // (all of min/max/default are whole numbers and name suggests a count/integer)
 function isIntegerParam(param) {
@@ -151,7 +161,7 @@ export default function ParamSliderPanel({ simConfig, currentParams, editorValue
           <SingleSlider
             key={p.name}
             param={p}
-            rawValue={currentParams[p.name] ?? p.default}
+            rawValue={getParamValue(currentParams, p.name) ?? p.default}
             onCommit={handleCommit}
           />
         ))}
