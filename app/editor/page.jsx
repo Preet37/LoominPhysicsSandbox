@@ -226,6 +226,7 @@ export default function PhysicsEditorPage() {
   const activeId = useLoominStore((s) => s.activeId);
   const setEditorValue = useLoominStore((s) => s.setEditorValue);
   const setVars = useLoominStore((s) => s.setVars);
+  const mergeVar = useLoominStore((s) => s.mergeVar);
   const setSimConfig = useLoominStore((s) => s.setSimConfig);
   const setTopic = useLoominStore((s) => s.setTopic);
   const setQuality = useLoominStore((s) => s.setQuality);
@@ -653,6 +654,7 @@ export default function PhysicsEditorPage() {
                     simConfig={simConfig}
                     currentParams={vars}
                     editorValue={editorValue}
+                    onParamChange={(key, val) => mergeVar(key, val)}
                     onEditorChange={(v) => {
                       setEditorValue(v);
                       setVars(parseParams(v));

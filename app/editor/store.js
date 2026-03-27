@@ -93,6 +93,19 @@ export const useLoominStore = create((set, get) => ({
     saveToLS(get());
   },
 
+  // Merge a single param key-value without discarding the rest of vars.
+  // Used by the slider panel so a drag/click update is reflected immediately
+  // in the 3-D scene and physics checker without waiting for a text parse cycle.
+  mergeVar: (key, value) => {
+    const { activeId } = get();
+    set((s) => ({
+      journals: s.journals.map((j) =>
+        j.id === activeId ? { ...j, vars: { ...j.vars, [key]: value } } : j
+      ),
+    }));
+    saveToLS(get());
+  },
+
   setVideo: (url) => {
     const { activeId } = get();
     set((s) => ({

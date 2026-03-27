@@ -12,37 +12,53 @@ function isIntegerParam(param) {
   );
 }
 
-// Patch a single param value in the raw editor text
+// Patch a single param value in the raw editor text.
+// Matches the param name case-insensitively so Wind_Speed, WIND_SPEED,
+// wind_speed etc. all resolve to the same line.
 function patchParam(text, paramName, newValue) {
+  // Build a pattern that matches any separator style (underscores → [\s_]*)
+  // while still being case-insensitive.
+  const escaped = paramName.replace(/_/g, "[_\\s]*");
   const re = new RegExp(
-    `^([ \\t]*${paramName}[ \\t]*=[ \\t]*)([\\d.+-]+)([ \\t]*.*)$`,
+    `^([ \\t]*${escaped}[ \\t]*=[ \\t]*)([\\d.+-]+)([ \\t]*.*)$`,
     "mi"
   );
   return text.replace(re, `$1${newValue}$3`);
+}
+
+function fmt(val, isInt) {
+  if (isInt) return Math.round(val);
+  return val % 1 === 0 ? val : parseFloat(val.toFixed(2));
 }
 
 function SingleSlider({ param, rawValue, onCommit }) {
   const isInt = isIntegerParam(param);
   const step = isInt ? 1 : (param.max - param.min) / 300;
 
-  // Visual fill — clamped to [0,100]%, but label shows real value
-  const pct = ((rawValue - param.min) / (param.max - param.min)) * 100;
-  const fillPct = Math.min(100, Math.max(0, pct));
-  const isOver = rawValue > param.max;
-
-  // Format displayed value
-  const displayVal = isInt
-    ? Math.round(rawValue)
-    : rawValue % 1 === 0
-    ? rawValue
-    : rawValue.toFixed(2);
-
+  // Local value updates immediately on any interaction so the display is
+  // always in sync. It syncs from the prop only when the prop changes AND
+  // we are not currently interacting (i.e. an external edit came in).
+  const [localValue, setLocalValue] = useState(rawValue);
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(String(displayVal));
+  const [draft, setDraft] = useState("");
+  const interacting = editing;
 
   useEffect(() => {
-    if (!editing) setDraft(String(displayVal));
-  }, [editing, displayVal]);
+    if (!interacting) {
+      setLocalValue(rawValue);
+    }
+  }, [rawValue]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const displayVal = fmt(localValue, isInt);
+  const pct = ((localValue - param.min) / (param.max - param.min)) * 100;
+  const fillPct = Math.min(100, Math.max(0, pct));
+  const isOver = localValue > param.max;
+
+  const commit = (v) => {
+    const clamped = isInt ? Math.round(v) : v;
+    setLocalValue(clamped);
+    onCommit(param.name, clamped);
+  };
 
   return (
     <div className="flex items-center gap-3 group">
@@ -63,16 +79,16 @@ function SingleSlider({ param, rawValue, onCommit }) {
           min={param.min}
           max={param.max}
           step={step}
-          value={Math.min(param.max, Math.max(param.min, rawValue))}
+          value={Math.min(param.max, Math.max(param.min, localValue))}
           onChange={(e) => {
             const v = isInt ? Math.round(Number(e.target.value)) : Number(e.target.value);
-            onCommit(param.name, v);
+            commit(v);
           }}
           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
         />
       </div>
 
-      {/* Value label */}
+      {/* Value label — click to type directly */}
       <div className="flex-shrink-0 text-right w-20">
         {editing ? (
           <input
@@ -83,29 +99,19 @@ function SingleSlider({ param, rawValue, onCommit }) {
             autoFocus
             onBlur={() => {
               const num = Number(draft);
-              if (Number.isFinite(num)) {
-                const v = isInt ? Math.round(num) : num;
-                onCommit(param.name, v);
-              }
+              if (Number.isFinite(num)) commit(num);
               setEditing(false);
             }}
             onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.currentTarget.blur();
-              } else if (e.key === "Escape") {
-                setEditing(false);
-                setDraft(String(displayVal));
-              }
+              if (e.key === "Enter") e.currentTarget.blur();
+              else if (e.key === "Escape") setEditing(false);
             }}
             className="w-full rounded-lg border border-white/15 bg-[#0b1220] px-2 py-1 text-[11px] font-mono text-white/90 outline-none focus:ring-1 focus:ring-indigo-500/60"
           />
         ) : (
           <button
             type="button"
-            onClick={() => {
-              setEditing(true);
-              setDraft(String(displayVal));
-            }}
+            onClick={() => { setEditing(true); setDraft(String(displayVal)); }}
             className={`text-[11px] font-mono font-semibold ${isOver ? "text-red-300" : "text-cyan-300"} hover:opacity-90 transition`}
             title="Click to edit value"
           >
@@ -120,11 +126,15 @@ function SingleSlider({ param, rawValue, onCommit }) {
   );
 }
 
-export default function ParamSliderPanel({ simConfig, currentParams, editorValue, onEditorChange }) {
+export default function ParamSliderPanel({ simConfig, currentParams, editorValue, onEditorChange, onParamChange }) {
   const params = simConfig?.params ?? [];
   if (params.length === 0) return null;
 
   const handleCommit = (paramName, newVal) => {
+    // Immediately update the isolated var so the 3-D scene and physics
+    // checker react without waiting for a parse round-trip.
+    onParamChange?.(paramName, newVal);
+    // Also patch the raw editor text so the notes panel stays in sync.
     const patched = patchParam(editorValue, paramName, newVal);
     onEditorChange?.(patched);
   };
