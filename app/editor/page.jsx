@@ -195,6 +195,13 @@ function validatePhysics(simConfig, params) {
 }
 
 // Only fix the params that are actually violating constraints — don't reset unrelated ones
+function patchParamFlexible(text, paramName, newValue) {
+  // Match Wind_Speed / WIND_SPEED / Wind Speed / WIND SPEED, etc.
+  const escaped = String(paramName).replace(/_/g, "[_\\s]*");
+  const re = new RegExp(`^(\\s*${escaped}\\s*=\\s*)([\\d.+-]+)(\\s*.*)$`, "mi");
+  return text.replace(re, `$1${newValue}$3`);
+}
+
 function buildAutoFixText(editorText, simConfig, currentParams) {
   let result = editorText;
   for (const constraint of simConfig?.constraints || []) {
@@ -206,11 +213,11 @@ function buildAutoFixText(editorText, simConfig, currentParams) {
       const optimalVal = simConfig?.optimalParams?.[constraint.param]
         ?? simConfig?.optimalParams?.[normKey];
       if (optimalVal !== undefined) {
-        // Match the param regardless of case (editor may have BALL_COUNT or Ball_Count)
-        result = result.replace(
-          new RegExp(`^(\\s*${constraint.param}\\s*=\\s*)([\\d.+-]+)(\\s*.*)$`, "mi"),
-          `$1${optimalVal}$3`
-        );
+        // Patch both constraint.param and normKey forms (some notes use WIND_SPEED,
+        // others use Wind_Speed; some use spaces instead of underscores).
+        const before = result;
+        result = patchParamFlexible(result, constraint.param, optimalVal);
+        if (result === before) result = patchParamFlexible(result, normKey, optimalVal);
       }
     }
   }
@@ -387,10 +394,24 @@ export default function PhysicsEditorPage() {
   // AUTO-FIX: only fix violated params, leave the rest (e.g. keep user's blade count)
   const handleAutoFix = useCallback(() => {
     if (!simConfig) return;
+    // 1) Patch the editor text (best-effort) so notes stay consistent.
     const newText = buildAutoFixText(editorValue, simConfig, vars);
     setEditorValue(newText);
-    const parsed = parseParams(newText);
-    setVars(parsed);
+
+    // 2) Deterministically update the sandbox params even if the editor text
+    // formatting is weird (spaces/underscores/casing).
+    const nextVars = { ...vars };
+    for (const constraint of simConfig?.constraints || []) {
+      const normKey = normalizeKey(constraint.param);
+      const val = vars[normKey] ?? vars[constraint.param];
+      if (val === undefined) continue;
+      if (val >= (constraint.warningThreshold ?? Infinity)) {
+        const optimalVal = simConfig?.optimalParams?.[constraint.param]
+          ?? simConfig?.optimalParams?.[normKey];
+        if (optimalVal !== undefined) nextVars[normKey] = optimalVal;
+      }
+    }
+    setVars(nextVars);
   }, [editorValue, simConfig, vars, setEditorValue, setVars]);
 
   // Derive live indicator
