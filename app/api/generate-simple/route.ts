@@ -4,7 +4,7 @@ import Groq from 'groq-sdk';
 // SIMPLE RELIABLE GENERATION
 // Uses templates for common objects, AI fills in details
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY || 'missing_groq_key' });
 
 // PRE-BUILT TEMPLATES for common objects (guaranteed to work)
 const TEMPLATES: Record<string, any> = {

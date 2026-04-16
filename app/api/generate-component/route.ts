@@ -5,7 +5,7 @@ import Groq from 'groq-sdk';
 // Similar to Arm.jsx and Turbine.jsx - with detailed meshes, materials, parameters, animations, and HUD
 
 const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY
+  apiKey: process.env.GROQ_API_KEY || 'missing_groq_key'
 });
 
 export async function POST(req: Request) {

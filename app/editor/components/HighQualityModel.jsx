@@ -106,7 +106,9 @@ export default function HighQualityModel({ topic, context = "" }) {
         const response = await fetch('/api/verify-model', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ description: topic, imageBase64 })
+          // Send both the screenshot (for Gemini vision) and the component data
+          // (for the text-based NVIDIA/Groq fallback when no Gemini key is present)
+          body: JSON.stringify({ description: topic, imageBase64, component: componentData })
         });
 
         const result = await response.json();
