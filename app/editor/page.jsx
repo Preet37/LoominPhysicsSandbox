@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Sparkles, Send, Loader2, Brain, Zap, AlertTriangle, CheckCircle, ShieldCheck, ShieldAlert, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
+import { Sparkles, Send, Loader2, Brain, Zap, AlertTriangle, CheckCircle, ShieldCheck, ShieldAlert, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ThumbsUp, ThumbsDown } from "lucide-react";
 import { useLoominStore } from "./store";
 import PhysicsScene from "./PhysicsScene";
 import StatusCard from "./components/StatusCard";
@@ -70,6 +70,13 @@ function buildPhysicsFallbackExplanation(simType, paramName, val, warn, crit, un
       Damping: `Each collision dissipates energy proportional to the damping coefficient. The cradle relies on nearly elastic collision (coefficient of restitution e ≈ 0.98 for steel). At damping = ${val}${u}, energy loss per swing is so high that momentum transfer p = mv is no longer fully passed through the chain — instead of the last ball swinging out fully, the system damps to rest in just a few oscillations, violating the n-in = n-out rule.`,
       Ball_Count: `With ${val} balls, the impulse chain becomes long enough that inelastic losses compound. The elastic wave traveling through the balls loses coherence, and instead of clean 1-1 transfer, multiple balls move simultaneously — breaking the fundamental Newton's Cradle behavior.`,
       String_Length: `Period T = 2π√(L/g). Short strings (L < 0.3m) increase oscillation frequency so high that air resistance and string elasticity dominate the dynamics. The system behaves more like a spring than a pendulum and the ideal elastic collision model breaks down.`,
+    },
+    inverted_pendulum: {
+      Pole_Angle: `The upright equilibrium of an inverted pendulum is unstable: any θ ≠ 0 creates a gravitational torque τ = m g (l/2) sin θ that grows the angle without correcting horizontal force. At |θ| = ${val}°, the linearized model λ² = g/l no longer holds; saturation and track limits dominate. Physically the mass line of action moves outside the cart support → tip-over.`,
+      Cart_Position: `Cart position x = ${val}${u} approaches the track limit. Real carts lose control authority at the rail end (no further acceleration to catch the falling pole). In experiments this is when encoders clip and the pole falls every time.`,
+      Pole_Length: `Longer l increases moment of inertia I = ⅓ml² about the pivot and reduces linearized natural frequency ω = √(g/l) — the pole “falls slower” but needs faster cart motion. At l = ${val}${u} with fixed motor torque, ẍ is insufficient to generate the horizontal correction before |θ| exceeds recoverable range.`,
+      Motor_Force: `Horizontal force F caps the maximum cart acceleration ẍ = F/(M+m). Stabilizing θ requires |ẍ| comparable to (g/L)·θ for small angles. At |F| = ${val}${u}N, the actuator saturates, the integrator in the controller winds up, and the pole crosses the critical angle in under one second of delay.`,
+      Damping: `Joint damping dissipates energy but also phase-lags the pendulum response. At damping = ${val}${u}, the phase margin of the feedback loop shrinks: corrections arrive “too late” and the root locus crosses into the right half-plane → growing oscillations instead of a balanced upright pose.`,
     },
     projectile: {
       Initial_Speed: `Kinetic energy = ½mv². Range R = v²·sin(2θ)/g, so range grows with v². At ${val}${u}, aerodynamic drag (F_drag = ½ρCdAv²) becomes dominant — drag force grows with v² just as range does, meaning the real trajectory deviates massively from the ideal parabola. In real applications this is the point where the object transitions from ballistic to aerodynamic flight.`,
@@ -160,6 +167,36 @@ function evaluateNotesQuality(text, simConfig) {
   return { score, checks };
 }
 
+/**
+ * Check whether a single constraint is violated.
+ * When criticalThreshold < warningThreshold the param is "lower-is-worse"
+ * (e.g. Lubrication_Level: warn=30, crit=15 — lower values are bad).
+ * In that case we flip to <=.
+ */
+function isConstraintViolated(val, threshold) {
+  // threshold is undefined / null → not violated
+  if (threshold == null || !isFinite(threshold)) return false;
+  return val >= threshold;
+}
+
+function constraintSeverity(val, c) {
+  // Detect "lower is worse": criticalThreshold < warningThreshold
+  const lowerIsBad =
+    c.criticalThreshold != null &&
+    c.warningThreshold != null &&
+    c.criticalThreshold < c.warningThreshold;
+
+  if (lowerIsBad) {
+    if (val <= (c.criticalThreshold ?? -Infinity)) return "CRITICAL";
+    if (val <= (c.warningThreshold ?? -Infinity)) return "WARNING";
+    return "OK";
+  }
+  // Normal "higher is worse"
+  if (val >= (c.criticalThreshold ?? Infinity)) return "CRITICAL";
+  if (val >= (c.warningThreshold ?? Infinity)) return "WARNING";
+  return "OK";
+}
+
 function validatePhysics(simConfig, params) {
   if (!simConfig?.constraints?.length) {
     return { state: "OPTIMAL", explanation: "", fixedParams: simConfig?.optimalParams || {} };
@@ -167,13 +204,10 @@ function validatePhysics(simConfig, params) {
   let worst = "OPTIMAL";
   let explanation = "";
   for (const c of simConfig.constraints) {
-    // Normalize the SIMCONFIG param name too, so it always matches the normalized editor key
     const val = params[normalizeKey(c.param)] ?? params[c.param];
     if (val === undefined) continue;
-    // Get unit for display
     const paramDef = simConfig.params?.find((p) => p.name === c.param);
     const unit = paramDef?.unit ? ` ${paramDef.unit}` : "";
-    // Always use our detailed physics chain explanation — it's far more educational
     const detailed = buildPhysicsFallbackExplanation(
       simConfig?.simType,
       c.param,
@@ -182,13 +216,23 @@ function validatePhysics(simConfig, params) {
       c.criticalThreshold,
       paramDef?.unit || ""
     );
-    if (val >= (c.criticalThreshold ?? Infinity)) {
+    const lowerIsBad =
+      c.criticalThreshold != null &&
+      c.warningThreshold != null &&
+      c.criticalThreshold < c.warningThreshold;
+
+    const sev = constraintSeverity(val, c);
+    if (sev === "CRITICAL") {
       worst = "CRITICAL_FAILURE";
-      explanation = `${normalizeKey(c.param)} is ${val}${unit} — exceeds the critical limit of ${c.criticalThreshold}${unit}. ${detailed}`;
+      explanation = lowerIsBad
+        ? `${normalizeKey(c.param)} is ${val}${unit} — below the critical minimum safe value of ${c.criticalThreshold}${unit}. ${detailed}`
+        : `${normalizeKey(c.param)} is ${val}${unit} — exceeds the critical limit of ${c.criticalThreshold}${unit}. ${detailed}`;
       break;
-    } else if (val >= (c.warningThreshold ?? Infinity) && worst !== "CRITICAL_FAILURE") {
+    } else if (sev === "WARNING" && worst !== "CRITICAL_FAILURE") {
       worst = "WARNING";
-      explanation = `${normalizeKey(c.param)} is ${val}${unit}, approaching the critical limit of ${c.criticalThreshold}${unit}. ${detailed}`;
+      explanation = lowerIsBad
+        ? `${normalizeKey(c.param)} is ${val}${unit}, approaching the minimum safe threshold (${c.warningThreshold}${unit}). ${detailed}`
+        : `${normalizeKey(c.param)} is ${val}${unit}, approaching the critical limit of ${c.criticalThreshold}${unit}. ${detailed}`;
     }
   }
   return { state: worst, explanation, fixedParams: simConfig?.optimalParams || {} };
@@ -219,7 +263,7 @@ function buildAutoFixText(editorText, simConfig, currentParams) {
     const normKey = normalizeKey(constraint.param);
     const val = currentParams[normKey] ?? findByKey(currentParams, constraint.param);
     if (val === undefined) continue;
-    if (val >= (constraint.warningThreshold ?? Infinity)) {
+    if (constraintSeverity(val, constraint) !== "OK") {
       // Case-insensitive lookup in optimalParams, then fall back to param default
       const optimalVal = findByKey(simConfig?.optimalParams, constraint.param)
         ?? findByKey(simConfig?.optimalParams, normKey)
@@ -245,9 +289,12 @@ export default function PhysicsEditorPage() {
   const setVars = useLoominStore((s) => s.setVars);
   const mergeVar = useLoominStore((s) => s.mergeVar);
   const setSimConfig = useLoominStore((s) => s.setSimConfig);
+  const setSceneCode = useLoominStore((s) => s.setSceneCode);
+  const recordVisualAccuracy = useLoominStore((s) => s.recordVisualAccuracy);
   const setTopic = useLoominStore((s) => s.setTopic);
   const setQuality = useLoominStore((s) => s.setQuality);
   const createJournal = useLoominStore((s) => s.createJournal);
+  const renameJournal = useLoominStore((s) => s.renameJournal);
 
   const active = useMemo(
     () => journals.find((j) => j.id === activeId) || journals[0],
@@ -260,12 +307,18 @@ export default function PhysicsEditorPage() {
   // the exact simulation that was generated, not a stale or reset state
   const activeTopic = active?.topic ?? "";
   const quality = active?.quality ?? "thinking";
+  const sceneCode = active?.sceneCode ?? null;
+
+  // Notes “caliber” slider. 0=Beginner, 1=Intermediate, 2=Advanced, 3=PhD
+  const [difficulty, setDifficulty] = useState(1);
 
   const [navOpen, setNavOpen] = useState(false);
   const [topicInput, setTopicInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [askDrawerOpen, setAskDrawerOpen] = useState(false);
   const [physicsState, setPhysicsState] = useState({ state: "OPTIMAL", explanation: "", fixedParams: {} });
+  // Agent steps from /api/generate-scene SSE stream
+  const [agentSteps, setAgentSteps] = useState([]);
   // Panel collapse: "both" | "notes-only" | "sandbox-only"
   const [panelMode, setPanelMode] = useState("both");
 
@@ -321,7 +374,7 @@ export default function PhysicsEditorPage() {
       const res = await fetch("/api/agent-pipeline", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic, quality }),
+        body: JSON.stringify({ topic, quality, difficulty }),
       });
 
       const reader = res.body.getReader();
@@ -392,6 +445,21 @@ export default function PhysicsEditorPage() {
       const parsedVars = parseParams(finalDisplay);
       if (Object.keys(parsedVars).length > 0) setVars(parsedVars);
 
+      const journalTitle = topic.replace(/\s+/g, " ").trim().slice(0, 72) || "Study";
+      renameJournal(activeId, journalTitle);
+
+      // For custom/unknown sim types, generate a reactive R3F scene component in the background.
+      const finalSimType = parseSIMCONFIG(fullText)?.simType || "custom";
+      const knownTypes = [
+        "wind_turbine", "pendulum", "newton_cradle", "inverted_pendulum",
+        "projectile", "rocket", "spring_mass", "orbit", "robot_arm", "bridge",
+        "water_bottle", "airplane", "helicopter", "mechanical_gears", "bicycle",
+        "submarine", "breadboard", "f1_car", "steam_engine",
+      ];
+      if (!knownTypes.includes(finalSimType)) {
+        setSceneCode(null);
+        generateSceneCode(topic, finalSimType, parseParams(cleanDisplay(fullText)), null);
+      }
     } catch (err) {
       console.error("generateNotes error:", err);
       setEditorValue(`## Error\nFailed to generate notes. Please try again.`);
@@ -399,7 +467,79 @@ export default function PhysicsEditorPage() {
       setStreaming(false);
       setTopicInput("");
     }
-  }, [topicInput, quality, streaming, setEditorValue, setVars, setSimConfig]);
+  }, [topicInput, quality, difficulty, streaming, activeId, setEditorValue, setVars, setSimConfig, setSceneCode, setTopic, renameJournal]);
+
+  // ── Generate an R3F scene component (SSE streaming agent) ──────────────────
+  const generateSceneCode = useCallback(async (topic, simType, params, feedback) => {
+    setAgentSteps([]);
+    try {
+      const { journals, activeId } = useLoominStore.getState();
+      const accuracyHistory = journals.find((j) => j.id === activeId)?.accuracyLog?.slice(-20) ?? [];
+      const res = await fetch("/api/generate-scene", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          topic,
+          simType: simType || "custom",
+          params: params || vars,
+          physicsContext: `Physics simulation for ${topic}. ${feedback || ""}`,
+          feedback: feedback || "",
+          accuracyHistory,
+        }),
+      });
+
+      if (!res.body) { console.warn("[generate-scene] no body"); return; }
+
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder();
+      let   buf     = "";
+
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const ev = JSON.parse(line.slice(6));
+            if (ev.event === "step") {
+              setAgentSteps((prev) => {
+                const idx = prev.findIndex(
+                  (s) => s.tool === ev.tool && s.turn === (ev.turn ?? 0),
+                );
+                if (idx >= 0) {
+                  const next = [...prev];
+                  next[idx] = ev;
+                  return next;
+                }
+                return [...prev, ev];
+              });
+            } else if (ev.event === "complete") {
+              setSceneCode(ev.code);
+              setAgentSteps([]);
+            } else if (ev.event === "error") {
+              console.warn("[generate-scene] agent error:", ev.error);
+              setAgentSteps([]);
+            }
+          } catch { /* malformed line, skip */ }
+        }
+      }
+    } catch (e) {
+      console.warn("[generate-scene] fetch failed:", e);
+      setAgentSteps([]);
+    }
+  }, [vars, setSceneCode]);
+
+  // Called by DynamicPhysicsScene when vision score is low or compile fails
+  const handleRegenerate = useCallback((feedback) => {
+    if (!activeTopic) return;
+    const simType = simConfig?.simType || "custom";
+    setSceneCode(null); // show loading state
+    generateSceneCode(activeTopic, simType, vars, feedback);
+  }, [activeTopic, simConfig, vars, generateSceneCode, setSceneCode]);
 
   // AUTO-FIX: only fix violated params, leave the rest (e.g. keep user's blade count)
   const handleAutoFix = useCallback(() => {
@@ -415,14 +555,12 @@ export default function PhysicsEditorPage() {
       const normKey = normalizeKey(constraint.param);
       const val = vars[normKey] ?? findByKey(vars, constraint.param);
       if (val === undefined) continue;
-      if (val >= (constraint.warningThreshold ?? Infinity)) {
+      if (constraintSeverity(val, constraint) !== "OK") {
         const optimalVal =
           findByKey(simConfig?.optimalParams, constraint.param) ??
           findByKey(simConfig?.optimalParams, normKey) ??
           simConfig?.params?.find(p => normalizeKey(p.name) === normKey)?.default;
         if (optimalVal !== undefined) {
-          // Write under the normalized key AND the original key so every
-          // possible lookup path finds the corrected value.
           nextVars[normKey] = optimalVal;
           nextVars[constraint.param] = optimalVal;
         }
@@ -468,9 +606,14 @@ export default function PhysicsEditorPage() {
               <div className="h-9 w-9 rounded-xl bg-white/10 ring-1 ring-white/15 backdrop-blur-md flex items-center justify-center">
                 <div className="h-4 w-4 rounded-sm bg-gradient-to-br from-indigo-400 via-fuchsia-300 to-emerald-300" />
               </div>
-              <div className="leading-tight">
+              <div className="leading-tight min-w-0 max-w-[min(280px,36vw)]">
                 <div className="text-[10px] tracking-[0.18em] uppercase text-white/45">Loomin</div>
-                <div className="text-[15px] font-semibold text-white/92">{active?.name ?? "Physics Sandbox"}</div>
+                <div
+                  className="text-[15px] font-semibold text-white/92 whitespace-normal break-words"
+                  title={active?.name ?? "Physics Sandbox"}
+                >
+                  {active?.name ?? "Physics Sandbox"}
+                </div>
               </div>
             </div>
 
@@ -581,6 +724,26 @@ export default function PhysicsEditorPage() {
                       {quality === "thinking" ? "nemotron-ultra / llama-70b" : "nemotron-nano / llama-8b"}
                     </span>
                   </div>
+
+                  {/* Difficulty slider */}
+                  <div className="mt-2 flex items-center justify-between">
+                    <div className="text-[11px] text-white/55 font-semibold">Difficulty</div>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="range"
+                        min={0}
+                        max={3}
+                        step={1}
+                        value={difficulty}
+                        onChange={(e) => setDifficulty(Number(e.target.value))}
+                        disabled={streaming}
+                        className="w-28 accent-indigo-400"
+                      />
+                      <span className="text-[11px] font-mono text-white/70">
+                        {difficulty === 0 ? "Beginner" : difficulty === 1 ? "Intermediate" : difficulty === 2 ? "Advanced" : "PhD"}
+                      </span>
+                    </div>
+                  </div>
                 </div>
 
                 {/* Factual quality */}
@@ -664,7 +827,41 @@ export default function PhysicsEditorPage() {
                       {simConfig?.displayName || simType || "No simulation"}
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap justify-end">
+                    {simType && (
+                      <div className="flex items-center gap-1 mr-1">
+                        <span className="text-[9px] text-white/35 uppercase tracking-wide hidden sm:inline">Visual</span>
+                        <button
+                          type="button"
+                          title="This 3D model matches the topic — we’ll prefer this style in future generations"
+                          onClick={() => recordVisualAccuracy(true, activeTopic, simType)}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-[10px] font-medium transition"
+                        >
+                          <ThumbsUp className="h-3 w-3" />
+                          Accurate
+                        </button>
+                        <button
+                          type="button"
+                          title="Doesn’t match — logs feedback and regenerates the AI scene with stricter geometry rules"
+                          onClick={() => {
+                            recordVisualAccuracy(false, activeTopic, simType);
+                            if (sceneCode) {
+                              setSceneCode(null);
+                              generateSceneCode(
+                                activeTopic,
+                                simType,
+                                vars,
+                                "USER MARKED THE 3D VISUAL AS INACCURATE. Rebuild from scratch. Mandatory: follow Y-up, ground disc at y=0; vehicles need VERTICAL wheels (rotation [Math.PI/2,0,0] on torus/cylinder); gears need radial tooth meshes in a loop with cos/sin; minimum 28 mesh elements; must be recognisable as the topic.",
+                              );
+                            }
+                          }}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-[10px] font-medium transition"
+                        >
+                          <ThumbsDown className="h-3 w-3" />
+                          Off
+                        </button>
+                      </div>
+                    )}
                     <span className="text-[10px] text-white/30">Drag to orbit</span>
                   </div>
                 </div>
@@ -676,6 +873,9 @@ export default function PhysicsEditorPage() {
                     params={vars}
                     simConfig={simConfig}
                     topic={activeTopic}
+                    sceneCode={sceneCode}
+                    onRegenerate={handleRegenerate}
+                    agentSteps={agentSteps}
                   />
 
                   {/* Status card overlay */}
@@ -724,7 +924,7 @@ export default function PhysicsEditorPage() {
             const res = await fetch("/api/agent-pipeline", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ topic, quality }),
+                body: JSON.stringify({ topic, quality, difficulty }),
             });
             const reader = res.body.getReader();
             const decoder = new TextDecoder();

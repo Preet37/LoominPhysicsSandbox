@@ -37,8 +37,10 @@ function patchParam(text, paramName, newValue) {
 }
 
 function fmt(val, isInt) {
-  if (isInt) return Math.round(val);
-  return val % 1 === 0 ? val : parseFloat(val.toFixed(2));
+  const n = parseFloat(val);
+  if (!isFinite(n)) return 0;
+  if (isInt) return Math.round(n);
+  return n % 1 === 0 ? n : parseFloat(n.toFixed(2));
 }
 
 function SingleSlider({ param, rawValue, onCommit }) {

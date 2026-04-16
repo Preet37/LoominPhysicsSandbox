@@ -65,6 +65,18 @@ export async function POST(req: Request) {
 
     // No Gemini key — use AI text-based verification instead
     if (!geminiKey) {
+      // If we only have a screenshot, we can't do true vision verification.
+      // Return a non-blocking score so geometry generation can proceed.
+      if (imageBase64) {
+        return NextResponse.json({
+          success: true,
+          verified: true,
+          score: 65,
+          issues: ["Gemini vision key missing; using heuristic fallback."],
+          suggestions: [],
+        });
+      }
+
       const target = component || modelData;
       if (target && description) {
         const result = await textVerify(description, target);

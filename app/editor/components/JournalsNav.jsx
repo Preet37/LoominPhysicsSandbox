@@ -38,26 +38,32 @@ export default function JournalsNav({ open, onToggle, onNewJournal }) {
   return (
     <div className="w-full h-full rounded-3xl bg-white/[0.045] ring-1 ring-white/12 backdrop-blur-xl shadow-[0_0_0_1px_rgba(255,255,255,0.04),0_30px_90px_rgba(0,0,0,0.55)] overflow-hidden flex flex-col">
       <div className="px-3 py-3 flex-shrink-0">
-        <div className="flex items-center gap-2">
+        {/* Fixed grid keeps the + control aligned regardless of journal title length */}
+        <div className="grid grid-cols-[minmax(0,1fr)_44px] gap-2 items-stretch">
           <button
             onClick={onToggle}
-            className="flex-1 rounded-2xl bg-white/6 ring-1 ring-white/10 hover:bg-white/8 transition px-3 py-2 flex items-center justify-between"
+            className="min-h-[44px] min-w-0 rounded-2xl bg-white/6 ring-1 ring-white/10 hover:bg-white/8 transition px-3 py-2 flex items-center justify-between gap-2"
             type="button"
           >
             <div className="min-w-0 flex items-center gap-2">
-              <div className="h-7 w-7 rounded-xl bg-white/8 ring-1 ring-white/10 flex items-center justify-center">
+              <div className="h-7 w-7 shrink-0 rounded-xl bg-white/8 ring-1 ring-white/10 flex items-center justify-center">
                 <div className="h-3.5 w-3.5 rounded-sm bg-gradient-to-br from-indigo-400 via-fuchsia-300 to-emerald-300 opacity-95" />
               </div>
-              <div className="min-w-0">
+              <div className="min-w-0 text-left">
                 <div className="text-[10px] tracking-[0.18em] uppercase text-white/45">Journal</div>
-                <div className="text-[13px] font-semibold text-white/88 truncate">{active?.name ?? "Journal"}</div>
+                <div
+                  className="text-[13px] font-semibold text-white/88 whitespace-normal break-words leading-snug line-clamp-4"
+                  title={active?.name ?? "Journal"}
+                >
+                  {active?.name ?? "Journal"}
+                </div>
               </div>
             </div>
 
             <motion.div
               animate={{ rotate: open ? 180 : 0 }}
               transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-              className="text-white/65"
+              className="text-white/65 shrink-0"
             >
               <ChevronDown className="h-4 w-4" />
             </motion.div>
@@ -65,7 +71,7 @@ export default function JournalsNav({ open, onToggle, onNewJournal }) {
 
           <button
             onClick={handleNewJournal}
-            className="h-[44px] w-[44px] rounded-2xl bg-white/8 ring-1 ring-white/12 hover:bg-white/12 active:bg-white/10 transition flex items-center justify-center"
+            className="w-[44px] min-h-[44px] rounded-2xl bg-white/8 ring-1 ring-white/12 hover:bg-white/12 active:bg-white/10 transition flex items-center justify-center self-stretch shrink-0"
             type="button"
             aria-label="New journal"
             title="New journal"
@@ -166,7 +172,12 @@ function JournalRow({ journal, active, canDelete, onSelect, onRename, onDelete }
               autoFocus
             />
           ) : (
-            <div className="text-[13px] text-white/88 truncate">{journal?.name ?? "Untitled"}</div>
+            <div
+              className="text-[13px] text-white/88 whitespace-normal break-words leading-snug text-left"
+              title={journal?.name ?? "Untitled"}
+            >
+              {journal?.name ?? "Untitled"}
+            </div>
           )}
         </div>
 
