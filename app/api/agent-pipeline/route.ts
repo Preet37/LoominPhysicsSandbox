@@ -143,6 +143,40 @@ function runValidatorAgent(fullText: string): { issues: string[]; valid: boolean
   return { issues, valid: issues.length === 0, toolCalls };
 }
 
+// ── Build the "Interactive Simulation" param block from the sim type definition ─
+// This generates concrete `Name = default // unit - try values between min-max`
+// lines so the LLM never sees a vague placeholder.
+const SIM_PARAM_DEFS: Record<string, Array<{ name: string; default: number; min: number; max: number; unit: string }>> = {
+  wind_turbine:       [{ name: 'Wind_Speed', default: 12, min: 0, max: 40, unit: 'm/s' }, { name: 'Blade_Count', default: 3, min: 1, max: 6, unit: 'blades' }, { name: 'Rotor_Diameter', default: 80, min: 20, max: 150, unit: 'm' }],
+  newton_cradle:      [{ name: 'Ball_Count', default: 5, min: 2, max: 7, unit: 'balls' }, { name: 'Balls_Up', default: 1, min: 1, max: 4, unit: 'balls' }, { name: 'String_Length', default: 1.5, min: 0.5, max: 3, unit: 'm' }, { name: 'Damping', default: 0.04, min: 0, max: 0.5, unit: 'unitless' }],
+  inverted_pendulum:  [{ name: 'Pole_Angle', default: 12, min: -40, max: 40, unit: 'deg' }, { name: 'Cart_Position', default: 0, min: -2, max: 2, unit: 'm' }, { name: 'Pole_Length', default: 0.55, min: 0.2, max: 1.2, unit: 'm' }, { name: 'Motor_Force', default: 0, min: -120, max: 120, unit: 'N' }, { name: 'Damping', default: 0.08, min: 0, max: 0.35, unit: 'unitless' }],
+  projectile:         [{ name: 'Launch_Angle', default: 45, min: 0, max: 90, unit: 'deg' }, { name: 'Initial_Speed', default: 30, min: 1, max: 150, unit: 'm/s' }, { name: 'Gravity', default: 9.81, min: 1, max: 25, unit: 'm/s²' }],
+  rocket:             [{ name: 'Launch_Angle', default: 45, min: 0, max: 85, unit: 'deg' }, { name: 'Initial_Speed', default: 30, min: 1, max: 150, unit: 'm/s' }, { name: 'Gravity', default: 9.81, min: 1, max: 25, unit: 'm/s²' }, { name: 'Mass_Ratio', default: 20, min: 2, max: 50, unit: 'unitless' }],
+  spring_mass:        [{ name: 'Spring_Stiffness', default: 100, min: 10, max: 1000, unit: 'N/m' }, { name: 'Mass', default: 2, min: 0.1, max: 20, unit: 'kg' }, { name: 'Damping', default: 0.5, min: 0, max: 10, unit: 'N·s/m' }, { name: 'Amplitude', default: 0.8, min: 0.1, max: 3, unit: 'm' }],
+  orbit:              [{ name: 'Star_Mass', default: 20, min: 1, max: 100, unit: 'relative' }, { name: 'Orbital_Radius', default: 4, min: 1, max: 8, unit: 'relative' }, { name: 'Orbital_Speed', default: 1, min: 0.1, max: 5, unit: 'relative' }],
+  robot_arm:          [{ name: 'Arm_Shoulder_Pitch', default: 0, min: -70, max: 70, unit: 'deg' }, { name: 'Arm_Elbow_Pitch', default: 0, min: -120, max: 120, unit: 'deg' }, { name: 'Arm_Wrist_Pitch', default: 0, min: -90, max: 90, unit: 'deg' }, { name: 'Gripper_Open', default: 50, min: 0, max: 100, unit: '%' }, { name: 'Finger_Curl', default: 18, min: 0, max: 75, unit: 'deg' }],
+  bridge:             [{ name: 'Load', default: 100, min: 0, max: 500, unit: 'kN' }, { name: 'Span', default: 40, min: 10, max: 120, unit: 'm' }, { name: 'Material_Strength', default: 350, min: 100, max: 800, unit: 'MPa' }, { name: 'Deck_Thickness', default: 0.5, min: 0.1, max: 2, unit: 'm' }],
+  water_bottle:       [{ name: 'Fill_Level', default: 65, min: 0, max: 100, unit: '%' }, { name: 'Temperature', default: 20, min: 0, max: 100, unit: '°C' }, { name: 'Pressure', default: 101, min: 80, max: 200, unit: 'kPa' }, { name: 'Wall_Thickness', default: 2, min: 0.5, max: 5, unit: 'mm' }],
+  airplane:           [{ name: 'Airspeed', default: 250, min: 50, max: 350, unit: 'km/h' }, { name: 'Angle_of_Attack', default: 5, min: -5, max: 20, unit: 'deg' }, { name: 'Thrust', default: 250000, min: 50000, max: 320000, unit: 'N' }, { name: 'Flap_Setting', default: 0, min: 0, max: 40, unit: 'deg' }],
+  helicopter:         [{ name: 'Main_Rotor_RPM', default: 300, min: 0, max: 600, unit: 'RPM' }, { name: 'Collective_Pitch', default: 10, min: 0, max: 25, unit: 'deg' }, { name: 'Air_Density', default: 1.225, min: 0.5, max: 1.3, unit: 'kg/m³' }, { name: 'Gross_Weight', default: 3000, min: 500, max: 5000, unit: 'kg' }, { name: 'Tail_Rotor_RPM', default: 1800, min: 0, max: 3500, unit: 'RPM' }],
+  mechanical_gears:   [{ name: 'Number_of_Teeth', default: 20, min: 6, max: 80, unit: 'teeth' }, { name: 'Gear_Ratio', default: 2, min: 0.2, max: 12, unit: 'unitless' }, { name: 'Input_Torque', default: 100, min: 0, max: 600, unit: 'Nm' }, { name: 'Lubrication_Quality', default: 0.8, min: 0, max: 1, unit: 'unitless' }, { name: 'Tooth_Strength', default: 500, min: 100, max: 1000, unit: 'MPa' }, { name: 'Operating_Speed', default: 1000, min: 0, max: 5000, unit: 'RPM' }],
+  bicycle:            [{ name: 'Wheel_Diameter', default: 26, min: 16, max: 36, unit: 'inches' }, { name: 'Gear_Ratio', default: 2.5, min: 0.5, max: 8, unit: 'unitless' }, { name: 'Brake_Force', default: 50, min: 0, max: 200, unit: 'N' }, { name: 'Rider_Mass', default: 75, min: 40, max: 120, unit: 'kg' }, { name: 'Speed', default: 25, min: 0, max: 60, unit: 'km/h' }],
+  f1_car:             [{ name: 'Speed', default: 200, min: 0, max: 400, unit: 'km/h' }, { name: 'Rear_Wing_Angle', default: 12, min: 0, max: 40, unit: 'deg' }, { name: 'Downforce', default: 3000, min: 0, max: 10000, unit: 'N' }, { name: 'Tire_Pressure', default: 24, min: 15, max: 40, unit: 'psi' }, { name: 'Brake_Balance', default: 55, min: 30, max: 80, unit: '%' }, { name: 'ERS_Deployment', default: 60, min: 0, max: 100, unit: '%' }, { name: 'Fuel_Load', default: 80, min: 0, max: 110, unit: 'kg' }],
+  steam_engine:       [{ name: 'Boiler_Pressure', default: 10, min: 1, max: 25, unit: 'bar' }, { name: 'Piston_Speed', default: 60, min: 5, max: 400, unit: 'RPM' }, { name: 'Boiler_Temp', default: 180, min: 100, max: 400, unit: '°C' }, { name: 'Lubrication_Level', default: 80, min: 0, max: 100, unit: '%' }],
+  submarine:          [{ name: 'Ballast_Tank_Volume', default: 500, min: 100, max: 2000, unit: 'm³' }, { name: 'Propeller_RPM', default: 80, min: 0, max: 150, unit: 'rev/s' }, { name: 'Dive_Depth', default: 200, min: 0, max: 800, unit: 'm' }, { name: 'Hull_Thickness', default: 0.18, min: 0.05, max: 0.4, unit: 'm' }, { name: 'Snorkel_Depth', default: 1, min: 0, max: 20, unit: 'm' }],
+  breadboard:         [{ name: 'Contact_Resistance', default: 1, min: 0.1, max: 50, unit: 'Ω' }, { name: 'Component_Mass', default: 50, min: 1, max: 500, unit: 'g' }, { name: 'Signal_Frequency', default: 1, min: 0.01, max: 200, unit: 'MHz' }, { name: 'Humidity_Level', default: 50, min: 0, max: 100, unit: '%' }, { name: 'Temperature', default: 25, min: -10, max: 120, unit: '°C' }],
+};
+
+function buildParamBlock(simType: string): string {
+  const defs = SIM_PARAM_DEFS[simType];
+  if (!defs) {
+    // custom or unknown — provide a clear placeholder with instructions
+    return `Param_One = 10 // your-unit - replace with 3-5 physics-relevant parameters for this topic
+Param_Two = 5 // your-unit - each line: Param_Name = default_value // unit - try values between min-max`;
+  }
+  return defs.map(p => `${p.name} = ${p.default} // ${p.unit} - try values between ${p.min}-${p.max}`).join('\n');
+}
+
 // ── Design Agent system prompt — with full SIM TYPE REFERENCE ─────────────
 function buildDesignPrompt(
   brief: string,
@@ -193,8 +227,7 @@ ${fastConfig.sentenceMin}-${fastConfig.sentenceMax} sentences. Include physical 
 Adjust the parameters below to see real-time changes in the 3D simulation.
 Try pushing them past their limits to see what breaks and why!
 
-Wind_Speed = 12 // m/s - try values between 0-40
-Blade_Count = 3 // blades - try values between 1-6
+${buildParamBlock('wind_turbine')}
 
 ---
 💡 **Tip:** Push parameters beyond their limits — watch the physics break and read why!
@@ -206,7 +239,10 @@ Blade_Count = 3 // blades - try values between 1-6
 RESEARCH DATA (use these real numbers):
 ${brief}
 
-The above is an EXAMPLE for wind turbines. Now generate the same format for the user's actual topic. Rules:
+The above is an EXAMPLE for wind turbines. Now generate the same format for "${simType}". The param lines for ${simType} must be:
+${buildParamBlock(simType)}
+
+Rules:
 - SIMCONFIG always in <SIMCONFIG>...</SIMCONFIG> tags, never in code blocks
 - Param names in the parameter block must exactly match param names in the SIMCONFIG
 - All warningThreshold and criticalThreshold values must be strictly greater than the default value
@@ -271,7 +307,7 @@ Include at least ${thinkingConfig.failureModes} failure modes, each with:
 Adjust the parameters below to see real-time changes in the 3D simulation.
 Try pushing them past their limits to see what breaks and why!
 
-PARAM_NAME = VALUE // unit - try values between MIN-MAX
+${buildParamBlock(simType)}
 
 ---
 💡 **Tip:** Push parameters beyond their limits — watch the physics break and read why!

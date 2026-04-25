@@ -738,45 +738,46 @@ export default function PhysicsEditorPage() {
                     </div>
                   </div>
 
-                  {/* Tab bar */}
-                  <div className="flex-shrink-0 flex items-center gap-0.5 px-3 py-1.5 border-b border-white/8 overflow-x-auto">
+                  {/* Tab bar — compact: active shows icon+label, inactive shows icon-only with tooltip */}
+                  <div className="flex-shrink-0 flex items-center gap-0.5 px-2 py-1.5 border-b border-white/8">
                     {TABS.map(({ id, label, Icon }) => {
                       const isActive = activeTab === id;
                       const hasBadge = (id === "equations" && equations.length > 0) ||
                                        (id === "sources"   && sources.length > 0) ||
                                        (id === "python"    && !!pythonScript) ||
                                        (id === "wiki"      && !!wikiArticle);
+                      const isSpinning = (id === "equations" || id === "python") && artifactsGenerating;
                       return (
                         <button
                           key={id}
                           onClick={() => setActiveTab(id)}
-                          className={`relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold whitespace-nowrap transition flex-shrink-0 ${
+                          title={label}
+                          className={`relative flex items-center gap-1 rounded-lg text-[11px] font-semibold whitespace-nowrap transition flex-shrink-0 ${
                             isActive
-                              ? "bg-white/10 ring-1 ring-white/15 text-white"
-                              : "text-white/40 hover:text-white/65 hover:bg-white/5"
+                              ? "bg-white/10 ring-1 ring-white/15 text-white px-2.5 py-1.5"
+                              : "text-white/40 hover:text-white/65 hover:bg-white/5 px-2 py-1.5"
                           }`}
                         >
-                          <Icon className={`h-3.5 w-3.5 ${isActive ? "text-indigo-400" : ""}`} />
-                          {label}
+                          <Icon className={`flex-shrink-0 ${isActive ? "h-3.5 w-3.5 text-indigo-400" : "h-3.5 w-3.5"}`} />
+                          {/* Show label only for active tab to save horizontal space */}
+                          {isActive && <span>{label}</span>}
                           {hasBadge && !isActive && (
-                            <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-indigo-400" />
+                            <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-indigo-400" />
                           )}
-                          {(id === "equations" || id === "python") && artifactsGenerating && (
-                            <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                          {isSpinning && (
+                            <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
                           )}
                         </button>
                       );
                     })}
 
-                    {/* Factual guard badge — only on Notes tab */}
-                    {activeTab === "notes" && (
-                      <div className={`ml-auto flex-shrink-0 flex items-center gap-1.5 text-[10px] px-2 py-1 rounded-lg ring-1 ${
-                        notesQuality.score >= 80 ? "bg-emerald-950/40 ring-emerald-500/25 text-emerald-300" : "bg-amber-950/35 ring-amber-500/25 text-amber-300"
-                      }`}>
-                        {notesQuality.score >= 80 ? <ShieldCheck className="h-3 w-3" /> : <ShieldAlert className="h-3 w-3" />}
-                        {notesQuality.score}%
-                      </div>
-                    )}
+                    {/* Factual guard badge — pinned to right */}
+                    <div className={`ml-auto flex-shrink-0 flex items-center gap-1 text-[10px] px-2 py-1 rounded-lg ring-1 ${
+                      notesQuality.score >= 80 ? "bg-emerald-950/40 ring-emerald-500/25 text-emerald-300" : "bg-amber-950/35 ring-amber-500/25 text-amber-300"
+                    }`} title={`Notes quality: ${notesQuality.score}%`}>
+                      {notesQuality.score >= 80 ? <ShieldCheck className="h-3 w-3" /> : <ShieldAlert className="h-3 w-3" />}
+                      {notesQuality.score}%
+                    </div>
                   </div>
 
                   {/* Tab content */}
@@ -808,48 +809,65 @@ export default function PhysicsEditorPage() {
                 transition={{ delay: 0.02, duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
                 className="min-h-0 flex-1 overflow-hidden relative z-0"
               >
-                <div className="h-full min-h-0 rounded-3xl bg-white/[0.05] ring-1 ring-white/12 backdrop-blur-xl overflow-hidden grid grid-rows-[auto,1fr]">
-                  <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
-                    <div className="flex items-center gap-3">
-                      <button onClick={() => setPanelMode(panelMode === "sandbox-only" ? "both" : "sandbox-only")} className="p-1.5 rounded-lg hover:bg-white/8 text-white/35 hover:text-white/70 transition">
-                        {panelMode === "sandbox-only" ? <PanelLeftOpen className="h-3.5 w-3.5" /> : <PanelLeftClose className="h-3.5 w-3.5" />}
-                      </button>
-                      <div className="text-sm font-semibold text-white/90">3D Sandbox</div>
-                      <div className="px-2 py-0.5 rounded-md bg-white/8 text-[10px] text-white/50 font-mono">
-                        {simConfig?.displayName || simType || "No simulation"}
-                      </div>
+                <div className="h-full min-h-0 rounded-3xl bg-white/[0.05] ring-1 ring-white/12 backdrop-blur-xl overflow-hidden grid grid-rows-[auto,1fr,auto]">
+                  {/* Compact single-row header — never wraps */}
+                  <div className="flex items-center gap-2 px-3 py-2 border-b border-white/10 flex-shrink-0 min-w-0">
+                    <button
+                      onClick={() => setPanelMode(panelMode === "sandbox-only" ? "both" : "sandbox-only")}
+                      className="p-1 rounded-lg hover:bg-white/8 text-white/35 hover:text-white/70 transition flex-shrink-0"
+                    >
+                      {panelMode === "sandbox-only" ? <PanelLeftOpen className="h-3.5 w-3.5" /> : <PanelLeftClose className="h-3.5 w-3.5" />}
+                    </button>
+                    <div className="text-[12px] font-semibold text-white/85 flex-shrink-0">3D Sandbox</div>
+                    <div className="px-1.5 py-0.5 rounded-md bg-white/8 text-[9px] text-white/45 font-mono truncate min-w-0 max-w-[90px]">
+                      {simConfig?.displayName || simType || "—"}
                     </div>
-                    <div className="flex items-center gap-2 flex-wrap justify-end">
-                      {simType && (
-                        <div className="flex items-center gap-1 mr-1">
-                          <span className="text-[9px] text-white/35 uppercase tracking-wide hidden sm:inline">Visual</span>
-                          <button
-                            type="button"
-                            onClick={() => recordVisualAccuracy(true, activeTopic, simType)}
-                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-[10px] font-medium transition"
-                          >
-                            <ThumbsUp className="h-3 w-3" /> Accurate
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              recordVisualAccuracy(false, activeTopic, simType);
-                              if (sceneCode) {
-                                setSceneCode(null);
-                                generateSceneCode(activeTopic, simType, vars, "USER MARKED THE 3D VISUAL AS INACCURATE. Rebuild from scratch with correct geometry.");
-                              }
-                            }}
-                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-[10px] font-medium transition"
-                          >
-                            <ThumbsDown className="h-3 w-3" /> Off
-                          </button>
-                        </div>
-                      )}
-                      <span className="text-[10px] text-white/30">Drag to orbit</span>
-                    </div>
+
+                    {/* Spacer */}
+                    <div className="flex-1 min-w-0" />
+
+                    {/* Visual accuracy buttons — compact icon+text */}
+                    {simType && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => recordVisualAccuracy(true, activeTopic, simType)}
+                          title="Mark visual as accurate"
+                          className="flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/25 text-emerald-300 text-[10px] font-medium transition flex-shrink-0"
+                        >
+                          <ThumbsUp className="h-3 w-3" />
+                          <span className="hidden sm:inline">Accurate</span>
+                        </button>
+                        <button
+                          type="button"
+                          title="Mark visual as inaccurate — triggers regeneration"
+                          onClick={() => {
+                            recordVisualAccuracy(false, activeTopic, simType);
+                            if (sceneCode) {
+                              setSceneCode(null);
+                              generateSceneCode(activeTopic, simType, vars, "USER MARKED THE 3D VISUAL AS INACCURATE. Rebuild from scratch with correct geometry.");
+                            }
+                          }}
+                          className="flex items-center gap-1 px-2 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/25 text-rose-300 text-[10px] font-medium transition flex-shrink-0"
+                        >
+                          <ThumbsDown className="h-3 w-3" />
+                          <span className="hidden sm:inline">Off</span>
+                        </button>
+                      </>
+                    )}
+
+                    {/* Panel expand/collapse right */}
+                    <button
+                      onClick={() => setPanelMode(panelMode === "notes-only" ? "both" : "notes-only")}
+                      className="p-1 rounded-lg hover:bg-white/8 text-white/35 hover:text-white/70 transition flex-shrink-0"
+                      title={panelMode === "notes-only" ? "Show 3D sandbox" : "Expand 3D sandbox"}
+                    >
+                      {panelMode === "notes-only" ? <PanelRightOpen className="h-3.5 w-3.5" /> : <PanelRightClose className="h-3.5 w-3.5" />}
+                    </button>
                   </div>
 
-                  <div className="relative min-h-0 bg-[#050810]" style={{ paddingBottom: simConfig?.params?.length ? `${52 + simConfig.params.length * 40}px` : 0 }}>
+                  {/* Canvas row — fills all remaining height, never shrinks for sliders */}
+                  <div className="relative min-h-0 overflow-hidden bg-[#050810]">
                     <PhysicsScene
                       simType={simType}
                       params={vars}
@@ -862,6 +880,10 @@ export default function PhysicsEditorPage() {
                     <AnimatePresence mode="wait">
                       <StatusCard key={physicsState.state} physicsState={physicsState} onAutoFix={handleAutoFix} />
                     </AnimatePresence>
+                  </div>
+
+                  {/* Param sliders — separate row below canvas, scrollable if many params */}
+                  {(simConfig?.params?.length > 0) && (
                     <ParamSliderPanel
                       simConfig={simConfig}
                       currentParams={vars}
@@ -869,7 +891,7 @@ export default function PhysicsEditorPage() {
                       onParamChange={(key, val) => mergeVar(key, val)}
                       onEditorChange={(v) => { setEditorValue(v); setVars(parseParams(v)); }}
                     />
-                  </div>
+                  )}
                 </div>
               </motion.section>
             )}

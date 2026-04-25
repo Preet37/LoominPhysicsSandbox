@@ -154,7 +154,7 @@ export default function ParamSliderPanel({ simConfig, currentParams, editorValue
   };
 
   return (
-    <div className="absolute bottom-0 left-0 right-0 z-10 px-4 py-3 bg-[#050810]/90 border-t border-white/8 backdrop-blur-md">
+    <div className="flex-shrink-0 px-4 py-3 bg-[#050810]/90 border-t border-white/8 backdrop-blur-md max-h-[200px] overflow-y-auto">
       <div className="text-[9px] uppercase tracking-widest text-white/25 mb-2.5">
         Parameters — drag to adjust
       </div>
