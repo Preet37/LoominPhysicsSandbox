@@ -3,7 +3,7 @@ import Groq from 'groq-sdk';
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY || 'missing_groq_key' });
 
 const NVIDIA_BASE    = 'https://integrate.api.nvidia.com/v1';
-const NVIDIA_THINKING = 'nvidia/llama-3.1-nemotron-ultra-253b-v1';
+const NVIDIA_THINKING = 'meta/llama-3.1-405b-instruct';
 const NVIDIA_FAST     = 'nvidia/llama-3.1-nemotron-nano-8b-v1';
 const GROQ_THINKING   = 'llama-3.3-70b-versatile';
 const GROQ_FAST       = 'llama-3.1-8b-instant';
@@ -132,6 +132,7 @@ Sim type options: wind_turbine, newton_cradle (for pendulum/cradle/collisions), 
 async function* nvidiaStream(messages: object[], model: string, maxTokens: number): AsyncGenerator<string> {
   const res = await fetch(`${NVIDIA_BASE}/chat/completions`, {
     method: 'POST',
+    signal: AbortSignal.timeout(90_000),
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${process.env.NVIDIA_API_KEY}`,

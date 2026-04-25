@@ -10,7 +10,7 @@
 import { retrievePhysicsKnowledge, classifySimType, PHYSICS_KB, type PhysicsEntry } from '@/lib/physics-kb';
 
 const NVIDIA_BASE      = 'https://integrate.api.nvidia.com/v1';
-const NVIDIA_THINKING  = 'nvidia/llama-3.1-nemotron-ultra-253b-v1';
+const NVIDIA_THINKING  = 'meta/llama-3.1-405b-instruct';
 const NVIDIA_FAST      = 'nvidia/llama-3.1-nemotron-nano-8b-v1';
 
 // ── Structural tool implementations (run locally, zero latency) ────────────
@@ -65,13 +65,42 @@ function runResearchAgent(topic: string): { brief: string; simType: string; entr
 function runValidatorAgent(fullText: string): { issues: string[]; valid: boolean; toolCalls: number } {
   const issues: string[] = [];
 
-  // Extract SIMCONFIG
-  const m = fullText.match(/<simconfig>([\s\S]*?)<\/simconfig>/i)
-    || fullText.match(/```json\s*(\{[\s\S]*?"simType"[\s\S]*?\})\s*```/i);
-  if (!m) return { issues: ['No SIMCONFIG found in output'], valid: false, toolCalls: 0 };
+  // Extract SIMCONFIG — try multiple formats the model might output
+  let sc: any = null;
 
-  let sc: any;
-  try { sc = JSON.parse(m[1].trim()); } catch { return { issues: ['SIMCONFIG JSON parse error'], valid: false, toolCalls: 0 }; }
+  const tagM = fullText.match(/<simconfig>([\s\S]*?)<\/simconfig>/i);
+  if (tagM) { try { sc = JSON.parse(tagM[1].trim()); } catch {} }
+
+  if (!sc) {
+    const codeM = fullText.match(/```json\s*(\{[\s\S]*?"simType"[\s\S]*?\})\s*```/i);
+    if (codeM) { try { sc = JSON.parse(codeM[1].trim()); } catch {} }
+  }
+
+  if (!sc) {
+    // Model sometimes outputs "SIMCONFIG\n{...}" without XML tags
+    const labelM = fullText.match(/SIMCONFIG\s*\n(\{[\s\S]*?\n\})/i);
+    if (labelM) { try { sc = JSON.parse(labelM[1]); } catch {} }
+  }
+
+  if (!sc) {
+    // Scan for any JSON object containing "simType"
+    let depth = 0; let start = -1;
+    for (let i = 0; i < fullText.length; i++) {
+      if (fullText[i] === '{') { if (depth === 0) start = i; depth++; }
+      else if (fullText[i] === '}') {
+        depth--;
+        if (depth === 0 && start !== -1) {
+          const block = fullText.slice(start, i + 1);
+          if (block.includes('"simType"')) {
+            try { const p = JSON.parse(block); if (p.simType) { sc = p; break; } } catch {}
+          }
+          start = -1;
+        }
+      }
+    }
+  }
+
+  if (!sc) return { issues: ['No SIMCONFIG found in output'], valid: false, toolCalls: 0 };
 
   const params   = sc.params        ?? [];
   const constrs  = sc.constraints   ?? [];
@@ -280,9 +309,10 @@ CRITICAL RULES:
 }
 
 // ── NVIDIA SSE streaming ──────────────────────────────────────────────────
-async function* nvidiaStream(messages: object[], model: string, maxTokens: number): AsyncGenerator<string> {
+async function* nvidiaStream(messages: object[], model: string, maxTokens: number, timeoutMs = 90_000): AsyncGenerator<string> {
   const res = await fetch(`${NVIDIA_BASE}/chat/completions`, {
     method: 'POST',
+    signal: AbortSignal.timeout(timeoutMs),
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.NVIDIA_API_KEY}` },
     body: JSON.stringify({ model, messages, temperature: 0.45, max_tokens: maxTokens, stream: true }),
   });
@@ -307,9 +337,10 @@ async function* nvidiaStream(messages: object[], model: string, maxTokens: numbe
 }
 
 // ── Groq SSE streaming ────────────────────────────────────────────────────
-async function* groqStream(messages: object[], model: string, maxTokens: number): AsyncGenerator<string> {
+async function* groqStream(messages: object[], model: string, maxTokens: number, timeoutMs = 60_000): AsyncGenerator<string> {
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
+    signal: AbortSignal.timeout(timeoutMs),
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
     body: JSON.stringify({ model, messages, temperature: 0.45, max_tokens: maxTokens, stream: true }),
   });
@@ -375,30 +406,56 @@ export async function POST(req: Request) {
         const messages     = [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }];
 
         let fullText = '';
+        let usedFallback = false;
 
-        // Pick the right streaming generator
-        let streamGen: AsyncGenerator<string>;
+        const streamDesign = async (gen: AsyncGenerator<string>) => {
+          for await (const chunk of gen) {
+            fullText += chunk;
+            send({ event: 'design_chunk', chunk });
+          }
+        };
+
+        // Try NVIDIA first (90s for thinking, 45s for fast). On failure, fall back to Groq.
         if (hasNvidia) {
           const model = isFast ? NVIDIA_FAST : NVIDIA_THINKING;
-          streamGen = nvidiaStream(messages, model, isFast ? 2000 : 3500);
+          const timeout = isFast ? 45_000 : 90_000;
+          try {
+            await streamDesign(nvidiaStream(messages, model, isFast ? 2000 : 3500, timeout));
+          } catch (nvidiaErr) {
+            console.warn('[agent-pipeline] NVIDIA stream failed, falling back to Groq:', String(nvidiaErr).slice(0, 120));
+            usedFallback = true;
+            // If we got some text already, keep it; otherwise start fresh with Groq
+            const groqModel = isFast ? 'llama-3.1-8b-instant' : 'llama-3.3-70b-versatile';
+            if (fullText.length < 200) {
+              // Start fresh — nothing useful was captured
+              fullText = '';
+              await streamDesign(groqStream(messages, groqModel, isFast ? 2000 : 3500));
+            } else {
+              // We have partial content — ask Groq to complete from where NVIDIA left off
+              const continueMessages = [
+                ...messages,
+                { role: 'assistant', content: fullText },
+                { role: 'user', content: 'Continue exactly where you left off. Complete the SIMCONFIG JSON block if it was cut off.' },
+              ];
+              await streamDesign(groqStream(continueMessages, groqModel, 1500));
+            }
+          }
         } else {
           const model = isFast ? 'llama-3.1-8b-instant' : 'llama-3.3-70b-versatile';
-          streamGen = groqStream(messages, model, isFast ? 2000 : 3500);
-        }
-
-        for await (const chunk of streamGen) {
-          fullText += chunk;
-          send({ event: 'design_chunk', chunk });
+          await streamDesign(groqStream(messages, model, isFast ? 2000 : 3500));
         }
 
         // ── Enforce correct simType in case the model wrote the wrong one ──
-        // e.g. model writes "projectile" when research classified "rocket"
         fullText = fullText.replaceAll(
           /("simType"\s*:\s*)"[^"]+"/g,
           `$1"${research.simType}"`,
         );
 
-        send({ event: 'agent_complete', agent: 'design', msg: 'Notes and SIMCONFIG generated' });
+        send({
+          event: 'agent_complete',
+          agent: 'design',
+          msg: usedFallback ? 'Notes generated (Groq fallback used)' : 'Notes and SIMCONFIG generated',
+        });
 
         // ────────────────────────────────────────────────────────────────
         // AGENT 3 — Validator: INSTANT (structural TypeScript checks, 0 API calls)
@@ -432,6 +489,8 @@ export async function POST(req: Request) {
       } catch (err) {
         console.error('[agent-pipeline]', err);
         send({ event: 'error', message: String(err) });
+        // Still send pipeline_complete so the frontend can process whatever was generated
+        // (fullText is in scope via closure if the error happened after some streaming)
       } finally {
         controller.close();
       }

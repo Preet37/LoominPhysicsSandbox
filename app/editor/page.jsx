@@ -2,7 +2,12 @@
 
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Sparkles, Send, Loader2, Brain, Zap, AlertTriangle, CheckCircle, ShieldCheck, ShieldAlert, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ThumbsUp, ThumbsDown } from "lucide-react";
+import {
+  Sparkles, Send, Loader2, Brain, Zap, AlertTriangle, CheckCircle,
+  ShieldCheck, ShieldAlert, PanelLeftClose, PanelLeftOpen,
+  PanelRightClose, PanelRightOpen, ThumbsUp, ThumbsDown,
+  FileText, Sigma, BarChart2, Code2, Paperclip, BookOpen, GraduationCap,
+} from "lucide-react";
 import { useLoominStore } from "./store";
 import PhysicsScene from "./PhysicsScene";
 import StatusCard from "./components/StatusCard";
@@ -11,18 +16,33 @@ import JournalsNav from "./components/JournalsNav";
 import AgentStatusBar from "./components/AgentStatusBar";
 import InteractiveNotesSurface from "./components/InteractiveNotesSurface";
 import ParamSliderPanel from "./components/ParamSliderPanel";
+import EquationsPanel from "./components/EquationsPanel";
+import GraphsPanel from "./components/GraphsPanel";
+import PythonPanel from "./components/PythonPanel";
+import WikiPanel from "./components/WikiPanel";
+import SourcesPanel from "./components/SourcesPanel";
+import LearnPanel from "./components/LearnPanel";
 
-// ── helpers ────────────────────────────────────────────────────────────────
+// ── Tab definitions ────────────────────────────────────────────────────────────
 
-// Normalize param key to Title_Snake_Case so components always match
-// regardless of what case the AI generated (BALL_COUNT / Ball_Count / ball_count all → Ball_Count)
+const TABS = [
+  { id: "notes",     label: "Notes",     Icon: FileText       },
+  { id: "equations", label: "Equations", Icon: Sigma          },
+  { id: "graphs",    label: "Graphs",    Icon: BarChart2      },
+  { id: "python",    label: "Python",    Icon: Code2          },
+  { id: "learn",     label: "Learn",     Icon: GraduationCap  },
+  { id: "sources",   label: "Sources",   Icon: Paperclip      },
+  { id: "wiki",      label: "Wiki",      Icon: BookOpen       },
+];
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
 function normalizeKey(key) {
   return key.split("_").map((p) => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join("_");
 }
 
 function parseParams(text) {
   const out = {};
-  // Match: PARAM_NAME = 12 or PARAM_NAME = 12.5 // optional comment
   const re = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([-+]?(?:\d+\.?\d*|\.\d+))\s*(?:\/\/.*)?$/gm;
   let m;
   while ((m = re.exec(text)) !== null) {
@@ -33,174 +53,65 @@ function parseParams(text) {
 }
 
 function parseSIMCONFIG(text) {
-  // 1. Case-insensitive tag match (handles <SIMCONFIG> and <simconfig>)
+  // 1. Explicit XML-style tags (case-insensitive)
   const tagMatch = text.match(/<simconfig>([\s\S]*?)<\/simconfig>/i);
-  if (tagMatch) {
-    try { return JSON.parse(tagMatch[1].trim()); } catch {}
-  }
-  // 2. JSON inside a markdown code block that has a simType field
+  if (tagMatch) { try { return JSON.parse(tagMatch[1].trim()); } catch {} }
+
+  // 2. Triple-backtick code block containing simType
   const codeMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?"simType"[\s\S]*?\})\s*```/i);
-  if (codeMatch) {
-    try { return JSON.parse(codeMatch[1].trim()); } catch {}
+  if (codeMatch) { try { return JSON.parse(codeMatch[1].trim()); } catch {} }
+
+  // 3. Model outputs "SIMCONFIG\n{...}" (no tags, just a labeled block)
+  const labeledMatch = text.match(/SIMCONFIG\s*\n(\{[\s\S]*?\n\})/i);
+  if (labeledMatch) { try { const p = JSON.parse(labeledMatch[1]); if (p.simType) return p; } catch {} }
+
+  // 4. Find any standalone JSON object containing "simType" — try progressively wider patterns
+  //    Extract all {...} blocks that contain "simType" and try to parse them
+  const jsonBlocks = [];
+  let depth = 0;
+  let start = -1;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (text[i] === "}") {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        jsonBlocks.push(text.slice(start, i + 1));
+        start = -1;
+      }
+    }
   }
-  // 3. Last resort: find any JSON object with simType anywhere in the text
-  const allJson = [...text.matchAll(/(\{[\s\S]*?"simType"\s*:[\s\S]*?\})\s*(?:\n|$)/g)];
-  for (const m of [...allJson].reverse()) {
+  for (const block of jsonBlocks.reverse()) {
+    if (!block.includes('"simType"')) continue;
     try {
-      const parsed = JSON.parse(m[1]);
+      const parsed = JSON.parse(block);
       if (parsed.simType) return parsed;
-    } catch {}
+    } catch { /* not valid JSON, skip */ }
   }
   return null;
 }
 
-// Physics chain explanations: Formula → Why it matters → What physically fails → Real consequence
 function buildPhysicsFallbackExplanation(simType, paramName, val, warn, crit, unit = "") {
   const p = normalizeKey(paramName);
   const u = unit ? ` ${unit}` : "";
-
-  // Per-param chains within each simType
-  const chains = {
-    wind_turbine: {
-      Wind_Speed: `Wind power scales as P = ½ρAv³ — so doubling wind speed increases aerodynamic load by 8×. More critically, blade bending stress follows σ = M·y/I where M ∝ v²·L², meaning stress grows with the square of wind speed. At ${val}${u}, this stress exceeds CFRP yield strength (~500 MPa). The blade begins to deform at its root, initiating fatigue cracks. If uncorrected, the blade detaches and the sudden imbalance can topple the tower.`,
-      Blade_Count: `More blades increase rotor solidity and drag torque. Beyond 6-7 blades, adjacent blades enter each other's wake, reducing aerodynamic efficiency and creating oscillating pressure differentials — the same flutter instability that destroyed the Tacoma Narrows Bridge. At ${val}${u}, the wake interaction frequency approaches the tower's natural frequency, risking resonance.`,
-      Rotor_Diameter: `Blade tip speed = ω × R. Larger rotors sweep more area (A = πR²), capturing more power, but centripetal stress on the blade root scales as σ_c ∝ ω²·R². At ${val}${u}m diameter with normal RPM, root stress exceeds structural limits and the blade cannot survive a rated storm load.`,
-    },
-    newton_cradle: {
-      Damping: `Each collision dissipates energy proportional to the damping coefficient. The cradle relies on nearly elastic collision (coefficient of restitution e ≈ 0.98 for steel). At damping = ${val}${u}, energy loss per swing is so high that momentum transfer p = mv is no longer fully passed through the chain — instead of the last ball swinging out fully, the system damps to rest in just a few oscillations, violating the n-in = n-out rule.`,
-      Ball_Count: `With ${val} balls, the impulse chain becomes long enough that inelastic losses compound. The elastic wave traveling through the balls loses coherence, and instead of clean 1-1 transfer, multiple balls move simultaneously — breaking the fundamental Newton's Cradle behavior.`,
-      String_Length: `Period T = 2π√(L/g). Short strings (L < 0.3m) increase oscillation frequency so high that air resistance and string elasticity dominate the dynamics. The system behaves more like a spring than a pendulum and the ideal elastic collision model breaks down.`,
-    },
-    inverted_pendulum: {
-      Pole_Angle: `The upright equilibrium of an inverted pendulum is unstable: any θ ≠ 0 creates a gravitational torque τ = m g (l/2) sin θ that grows the angle without correcting horizontal force. At |θ| = ${val}°, the linearized model λ² = g/l no longer holds; saturation and track limits dominate. Physically the mass line of action moves outside the cart support → tip-over.`,
-      Cart_Position: `Cart position x = ${val}${u} approaches the track limit. Real carts lose control authority at the rail end (no further acceleration to catch the falling pole). In experiments this is when encoders clip and the pole falls every time.`,
-      Pole_Length: `Longer l increases moment of inertia I = ⅓ml² about the pivot and reduces linearized natural frequency ω = √(g/l) — the pole “falls slower” but needs faster cart motion. At l = ${val}${u} with fixed motor torque, ẍ is insufficient to generate the horizontal correction before |θ| exceeds recoverable range.`,
-      Motor_Force: `Horizontal force F caps the maximum cart acceleration ẍ = F/(M+m). Stabilizing θ requires |ẍ| comparable to (g/L)·θ for small angles. At |F| = ${val}${u}N, the actuator saturates, the integrator in the controller winds up, and the pole crosses the critical angle in under one second of delay.`,
-      Damping: `Joint damping dissipates energy but also phase-lags the pendulum response. At damping = ${val}${u}, the phase margin of the feedback loop shrinks: corrections arrive “too late” and the root locus crosses into the right half-plane → growing oscillations instead of a balanced upright pose.`,
-    },
-    projectile: {
-      Initial_Speed: `Kinetic energy = ½mv². Range R = v²·sin(2θ)/g, so range grows with v². At ${val}${u}, aerodynamic drag (F_drag = ½ρCdAv²) becomes dominant — drag force grows with v² just as range does, meaning the real trajectory deviates massively from the ideal parabola. In real applications this is the point where the object transitions from ballistic to aerodynamic flight.`,
-      Gravity: `Vertical deceleration a = g controls flight time: t_flight = 2v·sinθ/g. At g = ${val}${u}, the projectile stays airborne unrealistically long, simulating a low-gravity environment like the Moon (1.62 m/s²) or Mars (3.72 m/s²). The parabola becomes extremely elongated and horizontal range increases dramatically.`,
-      Launch_Angle: `Range is maximized at θ = 45° where sin(2θ) = 1. Current angle ${val}° means sin(2×${val}°) = ${Math.sin(2 * (val || 0) * Math.PI / 180).toFixed(3)}, so range is ${(Math.sin(2 * (val || 0) * Math.PI / 180) * 100).toFixed(1)}% of maximum. The time of flight T = 2v·sinθ/g decreases as angle drops below 45°, reducing hang time and thus range.`,
-    },
-    rocket: {
-      Initial_Speed: `The Tsiolkovsky equation Δv = v_e·ln(m_i/m_f) defines achievable velocity change. At ${val}${u}, dynamic pressure q = ½ρv² is extremely high — at 100 m/s at sea level, q ≈ 6 kPa. Real rockets experience Max-Q (maximum aerodynamic stress) around 35 kPa, where structural loads from q × drag_area approach or exceed frame limits, risking vehicle breakup.`,
-      Gravity: `Gravity loss = g·t_burn represents velocity wasted fighting gravity. At g = ${val}${u}, a 10-second burn wastes ${(val * 10).toFixed(0)} m/s — at high gravity this is a significant fraction of achievable Δv, making orbit insertion impossible without much higher thrust.`,
-      Mass_Ratio: `The rocket equation requires mass ratio R = m_initial/m_final. At R = ${val}, Δv = v_e·ln(${val}) = ${(3000 * Math.log(Math.max(1.01, val))).toFixed(0)} m/s (for v_e = 3000 m/s). Above R ≈ 40, structural requirements for holding that much propellant exceed typical material limits — tanks become too thin to survive flight loads.`,
-    },
-    spring_mass: {
-      Spring_Stiffness: `Natural frequency ω_n = √(k/m). At k = ${val} N/m, ω_n = √(${val}/m) rad/s. If external forcing frequency matches ω_n, resonance occurs: amplitude A = F₀/(c·ω_n) → ∞ as damping c → 0. This is the mechanism behind the Tacoma Narrows Bridge collapse and fatigue failures in engine mounts.`,
-      Mass: `Increasing mass lowers ω_n = √(k/m) and slows the oscillation. At m = ${val} kg, the system becomes sluggish and requires more force to displace. In real systems (car suspensions, seismic isolators), excessive mass reduces the effectiveness of the spring as an energy absorber.`,
-      Damping: `The damping ratio ζ = c/(2√(km)) determines response character. At c = ${val}, ζ > 1 means overdamped — the system returns to equilibrium without oscillating, like a door closer. ζ < 1 means underdamped — oscillation persists. At the critical value, ζ = 1 gives fastest non-oscillatory return.`,
-      Amplitude: `Stored energy E = ½kA². At A = ${val}m, peak elastic potential energy = ½k·${val}². In real springs, large amplitude strains exceed the elastic limit — the spring yields (deforms permanently) and no longer obeys Hooke's Law F = -kx.`,
-    },
-    orbit: {
-      Orbital_Speed: `Orbital velocity for circular orbit: v = √(GM/r). At v = ${val}× the nominal value, the centripetal acceleration v²/r no longer equals gravitational acceleration GM/r². If v is too high, the body escapes into a hyperbolic trajectory. If too low, it spirals inward and eventually impacts the central body.`,
-      Star_Mass: `Gravitational force F = GMm/r². Increasing central mass increases orbital velocity requirement: v ∝ √M. At M = ${val}× nominal, orbital velocities become enormous and the escape velocity v_esc = √(2GM/r) approaches significant fractions of lightspeed for extreme values — the system approaches black hole territory.`,
-      Orbital_Radius: `Kepler's 3rd Law: T² ∝ r³. At r = ${val}× nominal, orbital period changes drastically. Too close, tidal forces (differential gravity across the orbiting body) can exceed the body's self-gravity and tear it apart — this is the Roche limit.`,
-    },
-    robot_arm: {
-      Arm_Shoulder_Pitch: `Joint torque τ = r × F. The shoulder must support the full arm weight at angle ${val}°. Torque τ = m_arm·g·L·cos(${val}°) = ${(Math.abs(Math.cos((val||0)*Math.PI/180))*100).toFixed(0)}% of max torque. Near 90°, the moment arm is minimized but motor operates near its torque limit. Beyond 70°, structural load at the shoulder joint exceeds the designed shear stress limit of the fasteners.`,
-      Arm_Elbow_Pitch: `At ${val}°, the forearm creates a kinematic singularity — the Jacobian matrix (which maps joint velocities to end-effector velocities) becomes singular. This means small changes in end-effector position require infinite joint velocity, making precise control impossible and risking a dangerous snap motion.`,
-      Arm_Wrist_Pitch: `The wrist concentrates force over a small contact area. At ${val}°, the mechanical advantage of the gripper changes dramatically — force F_grip = τ_motor / (r·cos(${val}°)). Near 90°, force transmission efficiency drops to near zero, and the wrist bearing experiences maximum shear load.`,
-    },
-    bridge: {
-      Load: `Bending moment at midspan M = w·L²/8 for uniform load w. At Load = ${val} kN, stress σ = M·c/I where c is distance from neutral axis. When σ exceeds material yield strength (steel: ~250 MPa, concrete: ~30 MPa), the beam yields permanently. The progression is: elastic deformation → plastic hinge → collapse mechanism.`,
-      Span: `Deflection δ = 5wL⁴/(384EI) — it scales with L⁴. Doubling span increases deflection by 16×. At Span = ${val}m, self-weight alone creates significant pre-stress. Slender bridges also become susceptible to wind-induced flutter — the same effect that destroyed the Tacoma Narrows Bridge in 1940.`,
-      Material_Strength: `Safety factor SF = σ_yield / σ_applied. At Material_Strength = ${val} MPa, the margin above working stress shrinks dangerously. A 10% overload or material defect can cause brittle fracture — sudden failure with no warning, as opposed to ductile failure which shows visible deformation first.`,
-      Deck_Thickness: `Section modulus S = I/c ∝ t³ (for rectangular section). Halving thickness reduces bending resistance by 8×. At t = ${val}m, the deck buckles under combined bending and compressive load — like pressing on the middle of a thin ruler.`,
-    },
-    water_bottle: {
-      Temperature: `PET plastic has a glass transition temperature of ~80°C. At ${val}°C, polymer chains gain enough thermal energy to slide past each other, causing permanent creep deformation. Simultaneously, internal vapor pressure of water rises — at 80°C, vapor pressure ≈ 47 kPa above atmospheric. The combination of softened plastic + rising internal pressure causes the bottle to bulge and ultimately fail at its weakest seam.`,
-      Pressure: `Hoop stress σ_h = P·r/t (thin-walled pressure vessel formula). At P = ${val} kPa gauge, σ_h = ${val}×1000 × r/t. For a 45mm radius bottle with 2mm wall, σ_h ≈ ${((val*1000*0.045)/0.002/1e6).toFixed(2)} MPa. PET yield strength is ~55 MPa — approaching this causes permanent deformation and stress whitening.`,
-      Fill_Level: `At ${val}% fill, the liquid acts as a pressure amplifier when dropped or squeezed. A water hammer effect occurs when sudden deceleration creates a pressure spike P = ρ·c·Δv (c = speed of sound in water ≈ 1500 m/s). Near-full bottles transmit this spike directly to the cap seal, which has the lowest burst pressure of any component.`,
-      Wall_Thickness: `Using σ_h = P·r/t, thinner walls mean higher stress for the same internal pressure. At t = ${val}mm, hoop stress σ_h = ${((101000*0.045)/(val/1000)/1e6).toFixed(2)} MPa under just atmospheric pressure. With any overpressure from temperature or impact, this exceeds yield strength and the bottle buckles inward (external pressure) or bursts (internal pressure).`,
-    },
-    airplane: {
-      Angle_Of_Attack: `Lift L = ½ρv²·CL·A where CL peaks near the critical angle of attack (~15-20°). At ${val}°, the boundary layer on the upper wing surface separates — airflow becomes turbulent and detaches, causing CL to drop suddenly by ~40%. This is aerodynamic stall: lift collapses faster than drag, and the nose pitches down uncontrollably unless the pilot reduces AoA immediately.`,
-      Airspeed: `Lift equation L = ½ρv²·CL·A shows lift ∝ v². At ${val} km/h, dynamic pressure q = ½ρv² = ${(0.5*1.225*(val/3.6)**2/1000).toFixed(1)} kPa. If this exceeds the wing's structural limit (typically 50-80 kPa for commercial aircraft), flutter occurs — the wing oscillates at its natural frequency with growing amplitude until structural failure.`,
-      Thrust: `At ${val} N of thrust, thrust-to-weight ratio T/W = ${val}/(typical 400,000 kg × 9.81). If T < Drag, the aircraft decelerates below stall speed. If T is excessive, q rises rapidly (v increases) and the aircraft can overspeed its Vmo (maximum operating speed), risking structural failure or control surface flutter.`,
-      Flap_Setting: `Flaps increase CL_max (allowing lower stall speed) but also dramatically increase drag (CD ∝ flap_angle²). At ${val}°, the drag increase requires more thrust to maintain level flight. Full flaps (40°) nearly double drag — at cruise speed this would create asymmetric loads that could structurally overstress the flap hinges.`,
-    },
-  };
-
-  // Try to find a specific param chain first
-  const simChains = chains[simType];
-  const specificChain = simChains?.[p] || simChains?.[paramName];
-
-  if (specificChain) {
-    const thresholds = warn !== undefined && crit !== undefined
-      ? ` [Thresholds: warning ${warn}${u}, critical ${crit}${u}]`
-      : "";
-    return `${specificChain}${thresholds}`;
-  }
-
-  // Generic fallback with formula chain structure
-  return `${p} at ${val}${u} has exceeded the safe operating range (warning: ${warn}${u}, critical: ${crit}${u}). In physical systems, parameters rarely fail in isolation — exceeding this value increases internal forces or stresses that follow power-law relationships (stress ∝ v², deflection ∝ L⁴, etc.), meaning small overages cause disproportionately large failures. Reduce ${p} incrementally and observe how the simulation state changes.`;
-}
-
-function evaluateNotesQuality(text, simConfig) {
-  const checks = [];
-  const body = text || "";
-  const hasEquation = /(=|\\frac|\\sigma|\\tau|\\rho|\\omega|F\s*=|P\s*=|m\s*\*)/.test(body);
-  const hasFailureModes = /failure|fracture|stall|collapse|buckl|resonance|singular|fatigue/i.test(body);
-  const hasInteractiveBlock = /interactive simulation/i.test(body);
-  const hasParamLines = /^\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*[-+]?(?:\d+\.?\d*|\.\d+)/m.test(body);
-
-  checks.push({ label: "Equation(s) present", pass: hasEquation });
-  checks.push({ label: "Failure modes explained", pass: hasFailureModes });
-  checks.push({ label: "Interactive section present", pass: hasInteractiveBlock });
-  checks.push({ label: "Editable parameter lines found", pass: hasParamLines });
-
-  if (simConfig?.params?.length) {
-    const lines = parseParams(body);
-    const expected = simConfig.params.map((p) => normalizeKey(p.name));
-    const missing = expected.filter((k) => lines[k] === undefined);
-    checks.push({
-      label: missing.length === 0 ? "All SIMCONFIG params are editable in notes" : `Missing editable params: ${missing.join(", ")}`,
-      pass: missing.length === 0,
-    });
-  }
-
-  const passCount = checks.filter((c) => c.pass).length;
-  const score = Math.round((passCount / Math.max(1, checks.length)) * 100);
-  return { score, checks };
-}
-
-/**
- * Check whether a single constraint is violated.
- * When criticalThreshold < warningThreshold the param is "lower-is-worse"
- * (e.g. Lubrication_Level: warn=30, crit=15 — lower values are bad).
- * In that case we flip to <=.
- */
-function isConstraintViolated(val, threshold) {
-  // threshold is undefined / null → not violated
-  if (threshold == null || !isFinite(threshold)) return false;
-  return val >= threshold;
+  return `${p} at ${val}${u} has exceeded the safe operating range (warning: ${warn}${u}, critical: ${crit}${u}). Reduce the parameter incrementally to restore optimal state.`;
 }
 
 function constraintSeverity(val, c) {
-  // Detect "lower is worse": criticalThreshold < warningThreshold
-  const lowerIsBad =
-    c.criticalThreshold != null &&
-    c.warningThreshold != null &&
-    c.criticalThreshold < c.warningThreshold;
-
+  const lowerIsBad = c.criticalThreshold != null && c.warningThreshold != null && c.criticalThreshold < c.warningThreshold;
   if (lowerIsBad) {
     if (val <= (c.criticalThreshold ?? -Infinity)) return "CRITICAL";
     if (val <= (c.warningThreshold ?? -Infinity)) return "WARNING";
     return "OK";
   }
-  // Normal "higher is worse"
   if (val >= (c.criticalThreshold ?? Infinity)) return "CRITICAL";
   if (val >= (c.warningThreshold ?? Infinity)) return "WARNING";
   return "OK";
 }
 
 function validatePhysics(simConfig, params) {
-  if (!simConfig?.constraints?.length) {
-    return { state: "OPTIMAL", explanation: "", fixedParams: simConfig?.optimalParams || {} };
-  }
+  if (!simConfig?.constraints?.length) return { state: "OPTIMAL", explanation: "", fixedParams: simConfig?.optimalParams || {} };
   let worst = "OPTIMAL";
   let explanation = "";
   for (const c of simConfig.constraints) {
@@ -208,19 +119,8 @@ function validatePhysics(simConfig, params) {
     if (val === undefined) continue;
     const paramDef = simConfig.params?.find((p) => p.name === c.param);
     const unit = paramDef?.unit ? ` ${paramDef.unit}` : "";
-    const detailed = buildPhysicsFallbackExplanation(
-      simConfig?.simType,
-      c.param,
-      val,
-      c.warningThreshold,
-      c.criticalThreshold,
-      paramDef?.unit || ""
-    );
-    const lowerIsBad =
-      c.criticalThreshold != null &&
-      c.warningThreshold != null &&
-      c.criticalThreshold < c.warningThreshold;
-
+    const detailed = buildPhysicsFallbackExplanation(simConfig?.simType, c.param, val, c.warningThreshold, c.criticalThreshold, paramDef?.unit || "");
+    const lowerIsBad = c.criticalThreshold != null && c.warningThreshold != null && c.criticalThreshold < c.warningThreshold;
     const sev = constraintSeverity(val, c);
     if (sev === "CRITICAL") {
       worst = "CRITICAL_FAILURE";
@@ -231,27 +131,22 @@ function validatePhysics(simConfig, params) {
     } else if (sev === "WARNING" && worst !== "CRITICAL_FAILURE") {
       worst = "WARNING";
       explanation = lowerIsBad
-        ? `${normalizeKey(c.param)} is ${val}${unit}, approaching the minimum safe threshold (${c.warningThreshold}${unit}). ${detailed}`
+        ? `${normalizeKey(c.param)} is ${val}${unit}, approaching the minimum safe threshold. ${detailed}`
         : `${normalizeKey(c.param)} is ${val}${unit}, approaching the critical limit of ${c.criticalThreshold}${unit}. ${detailed}`;
     }
   }
   return { state: worst, explanation, fixedParams: simConfig?.optimalParams || {} };
 }
 
-// Case-insensitive lookup through an object — handles AI key casing inconsistency
 function findByKey(obj, key) {
   if (!obj) return undefined;
   if (obj[key] !== undefined) return obj[key];
   const lower = key.toLowerCase();
-  for (const [k, v] of Object.entries(obj)) {
-    if (k.toLowerCase() === lower) return v;
-  }
+  for (const [k, v] of Object.entries(obj)) { if (k.toLowerCase() === lower) return v; }
   return undefined;
 }
 
-// Only fix the params that are actually violating constraints — don't reset unrelated ones
 function patchParamFlexible(text, paramName, newValue) {
-  // Match Wind_Speed / WIND_SPEED / Wind Speed / WIND SPEED, etc.
   const escaped = String(paramName).replace(/_/g, "[_\\s]*");
   const re = new RegExp(`^(\\s*${escaped}\\s*=\\s*)([\\d.+-]+)(\\s*.*)$`, "mi");
   return text.replace(re, `$1${newValue}$3`);
@@ -264,10 +159,7 @@ function buildAutoFixText(editorText, simConfig, currentParams) {
     const val = currentParams[normKey] ?? findByKey(currentParams, constraint.param);
     if (val === undefined) continue;
     if (constraintSeverity(val, constraint) !== "OK") {
-      // Case-insensitive lookup in optimalParams, then fall back to param default
-      const optimalVal = findByKey(simConfig?.optimalParams, constraint.param)
-        ?? findByKey(simConfig?.optimalParams, normKey)
-        ?? simConfig?.params?.find(p => normalizeKey(p.name) === normKey)?.default;
+      const optimalVal = findByKey(simConfig?.optimalParams, constraint.param) ?? findByKey(simConfig?.optimalParams, normKey) ?? simConfig?.params?.find((p) => normalizeKey(p.name) === normKey)?.default;
       if (optimalVal !== undefined) {
         const before = result;
         result = patchParamFlexible(result, constraint.param, optimalVal);
@@ -278,75 +170,84 @@ function buildAutoFixText(editorText, simConfig, currentParams) {
   return result;
 }
 
-// ── main component ─────────────────────────────────────────────────────────
+function evaluateNotesQuality(text, simConfig) {
+  const checks = [];
+  const body = text || "";
+  checks.push({ label: "Equation(s) present", pass: /(=|\\frac|\\sigma|\\tau|\\rho|\\omega|F\s*=|P\s*=|m\s*\*)/.test(body) });
+  checks.push({ label: "Failure modes explained", pass: /failure|fracture|stall|collapse|buckl|resonance|singular|fatigue/i.test(body) });
+  checks.push({ label: "Interactive section present", pass: /interactive simulation/i.test(body) });
+  checks.push({ label: "Editable parameter lines found", pass: /^\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*[-+]?(?:\d+\.?\d*|\.\d+)/m.test(body) });
+  if (simConfig?.params?.length) {
+    const lines = parseParams(body);
+    const expected = simConfig.params.map((p) => normalizeKey(p.name));
+    const missing = expected.filter((k) => lines[k] === undefined);
+    checks.push({ label: missing.length === 0 ? "All SIMCONFIG params are editable" : `Missing params: ${missing.join(", ")}`, pass: missing.length === 0 });
+  }
+  const passCount = checks.filter((c) => c.pass).length;
+  return { score: Math.round((passCount / Math.max(1, checks.length)) * 100), checks };
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
 
 export default function PhysicsEditorPage() {
-  const updateFromStorage = useLoominStore((s) => s.updateFromStorage);
-  const hasUpdated = useLoominStore((s) => s.hasUpdated);
-  const journals = useLoominStore((s) => s.journals);
-  const activeId = useLoominStore((s) => s.activeId);
-  const setEditorValue = useLoominStore((s) => s.setEditorValue);
-  const setVars = useLoominStore((s) => s.setVars);
-  const mergeVar = useLoominStore((s) => s.mergeVar);
-  const setSimConfig = useLoominStore((s) => s.setSimConfig);
-  const setSceneCode = useLoominStore((s) => s.setSceneCode);
+  const updateFromStorage  = useLoominStore((s) => s.updateFromStorage);
+  const hasUpdated         = useLoominStore((s) => s.hasUpdated);
+  const journals           = useLoominStore((s) => s.journals);
+  const activeId           = useLoominStore((s) => s.activeId);
+  const setEditorValue     = useLoominStore((s) => s.setEditorValue);
+  const setVars            = useLoominStore((s) => s.setVars);
+  const mergeVar           = useLoominStore((s) => s.mergeVar);
+  const setSimConfig       = useLoominStore((s) => s.setSimConfig);
+  const setSceneCode       = useLoominStore((s) => s.setSceneCode);
   const recordVisualAccuracy = useLoominStore((s) => s.recordVisualAccuracy);
-  const setTopic = useLoominStore((s) => s.setTopic);
-  const setQuality = useLoominStore((s) => s.setQuality);
-  const createJournal = useLoominStore((s) => s.createJournal);
-  const renameJournal = useLoominStore((s) => s.renameJournal);
+  const setTopic           = useLoominStore((s) => s.setTopic);
+  const setQuality         = useLoominStore((s) => s.setQuality);
+  const createJournal      = useLoominStore((s) => s.createJournal);
+  const renameJournal      = useLoominStore((s) => s.renameJournal);
+  const setActiveTab       = useLoominStore((s) => s.setActiveTab);
+  const setPythonScript    = useLoominStore((s) => s.setPythonScript);
+  const setEquations       = useLoominStore((s) => s.setEquations);
+  const setArtifactsGenerating = useLoominStore((s) => s.setArtifactsGenerating);
+  const addSource          = useLoominStore((s) => s.addSource);
+  const removeSource       = useLoominStore((s) => s.removeSource);
+  const setWikiArticle     = useLoominStore((s) => s.setWikiArticle);
 
-  const active = useMemo(
-    () => journals.find((j) => j.id === activeId) || journals[0],
-    [journals, activeId]
-  );
-  const editorValue = active?.editorValue ?? "";
-  const vars = active?.vars ?? {};
-  const simConfig = active?.simConfig ?? null;
-  // activeTopic and quality are stored per-journal so switching notes restores
-  // the exact simulation that was generated, not a stale or reset state
-  const activeTopic = active?.topic ?? "";
-  const quality = active?.quality ?? "thinking";
-  const sceneCode = active?.sceneCode ?? null;
+  const active = useMemo(() => journals.find((j) => j.id === activeId) || journals[0], [journals, activeId]);
+  const editorValue  = active?.editorValue ?? "";
+  const vars         = active?.vars ?? {};
+  const simConfig    = active?.simConfig ?? null;
+  const activeTopic  = active?.topic ?? "";
+  const quality      = active?.quality ?? "thinking";
+  const sceneCode    = active?.sceneCode ?? null;
+  const activeTab    = active?.activeTab ?? "notes";
+  const pythonScript = active?.pythonScript ?? null;
+  const equations    = active?.equations ?? [];
+  const sources      = active?.sources ?? [];
+  const wikiArticle  = active?.wikiArticle ?? null;
+  const artifactsGenerating = active?.artifactsGenerating ?? false;
 
-  // Notes “caliber” slider. 0=Beginner, 1=Intermediate, 2=Advanced, 3=PhD
-  const [difficulty, setDifficulty] = useState(1);
-
-  const [navOpen, setNavOpen] = useState(false);
-  const [topicInput, setTopicInput] = useState("");
-  const [streaming, setStreaming] = useState(false);
+  const [difficulty, setDifficulty]     = useState(1);
+  const [navOpen, setNavOpen]           = useState(false);
+  const [topicInput, setTopicInput]     = useState("");
+  const [streaming, setStreaming]       = useState(false);
   const [askDrawerOpen, setAskDrawerOpen] = useState(false);
   const [physicsState, setPhysicsState] = useState({ state: "OPTIMAL", explanation: "", fixedParams: {} });
-  // Agent steps from /api/generate-scene SSE stream
-  const [agentSteps, setAgentSteps] = useState([]);
-  // Panel collapse: "both" | "notes-only" | "sandbox-only"
-  const [panelMode, setPanelMode] = useState("both");
-
-  // Agent pipeline state — drives the AgentStatusBar UI
-  const [agentStates, setAgentStates] = useState({
-    research:  { status: "idle", msg: "", toolCalls: 0 },
-    design:    { status: "idle", msg: "", toolCalls: 0 },
-    validator: { status: "idle", msg: "", toolCalls: 0 },
-  });
+  const [agentSteps, setAgentSteps]     = useState([]);
+  const [panelMode, setPanelMode]       = useState("both");
+  const [agentStates, setAgentStates]   = useState({ research: { status: "idle", msg: "", toolCalls: 0 }, design: { status: "idle", msg: "", toolCalls: 0 }, validator: { status: "idle", msg: "", toolCalls: 0 } });
   const [pipelineMeta, setPipelineMeta] = useState({ totalToolCalls: 0, ragUsed: false, visible: false });
+  const [wikiCompiling, setWikiCompiling] = useState(false);
 
   useEffect(() => { updateFromStorage(); }, [updateFromStorage]);
 
-  // Re-validate on vars / simConfig change
-  useEffect(() => {
-    setPhysicsState(validatePhysics(simConfig, vars));
-  }, [vars, simConfig]);
+  useEffect(() => { setPhysicsState(validatePhysics(simConfig, vars)); }, [vars, simConfig]);
 
-  // When switching journals: re-parse vars and restore topic input
   useEffect(() => {
     if (!hasUpdated) return;
-    const parsed = parseParams(editorValue);
-    setVars(parsed);
-    // Restore the topic input to what was last used for this journal
+    setVars(parseParams(editorValue));
     setTopicInput(active?.topic ?? "");
   }, [hasUpdated, activeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Strips leaked prompt rules and SIMCONFIG blocks from display text
   const cleanDisplay = (text) =>
     text
       .replace(/<simconfig>[\s\S]*?<\/simconfig>/gi, "")
@@ -357,15 +258,39 @@ export default function PhysicsEditorPage() {
       .replace(/Do not output any explanation of these rules[\s\S]*/i, "")
       .trimEnd();
 
-  // Multi-agent pipeline: Research → Design → Validate
-  const generateNotes = useCallback(async () => {
-    const topic = topicInput.trim();
+  // ── Generate artifacts (Python + Equations) ──────────────────────────────
+
+  const generateArtifacts = useCallback(async (notes, simType, topic, params) => {
+    if (!notes?.trim() || !simType) return;
+    setArtifactsGenerating(true);
+    try {
+      const res = await fetch("/api/generate-artifacts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: notes.slice(0, 3000), simType, topic, params }),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.pythonScript) setPythonScript(data.pythonScript);
+      if (data.equations?.length) setEquations(data.equations);
+    } catch (err) {
+      console.warn("[generateArtifacts]", err);
+    } finally {
+      setArtifactsGenerating(false);
+    }
+  }, [setArtifactsGenerating, setPythonScript, setEquations]);
+
+  // ── Generate notes (main pipeline) ───────────────────────────────────────
+
+  const generateNotes = useCallback(async (topicOverride, notesOverride) => {
+    const topic = (topicOverride || topicInput).trim();
     if (!topic || streaming) return;
     setStreaming(true);
     setTopic(topic);
-    setEditorValue(`## Generating: ${topic}\n\n_Initialising multi-agent pipeline…_\n`);
+    if (!notesOverride) {
+      setEditorValue(`## Generating: ${topic}\n\n_Initialising multi-agent pipeline…_\n`);
+    }
 
-    // Reset agent status bar
     const idle = { status: "idle", msg: "", toolCalls: 0 };
     setAgentStates({ research: idle, design: idle, validator: idle });
     setPipelineMeta({ totalToolCalls: 0, ragUsed: false, visible: true });
@@ -380,7 +305,9 @@ export default function PhysicsEditorPage() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
-      let fullText = "";
+      let fullText = notesOverride || "";
+      // simType from the research agent (comes before any LLM generation)
+      let classifiedSimType = "custom";
 
       while (true) {
         const { done, value } = await reader.read();
@@ -388,41 +315,29 @@ export default function PhysicsEditorPage() {
         buf += decoder.decode(value, { stream: true });
         const lines = buf.split("\n");
         buf = lines.pop() ?? "";
-
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
           let evt;
           try { evt = JSON.parse(line.slice(6)); } catch { continue; }
-
           switch (evt.event) {
             case "agent_start":
-              setAgentStates((prev) => ({
-                ...prev,
-                [evt.agent]: { status: "running", msg: evt.msg, toolCalls: 0 },
-              }));
+              setAgentStates((prev) => ({ ...prev, [evt.agent]: { status: "running", msg: evt.msg, toolCalls: 0 } }));
               break;
-
             case "agent_complete":
-              setAgentStates((prev) => ({
-                ...prev,
-                [evt.agent]: { status: "done", msg: evt.msg, toolCalls: evt.toolCalls ?? 0 },
-              }));
+              // Capture simType from the research agent's completion event
+              if (evt.agent === "research" && evt.simType) classifiedSimType = evt.simType;
+              setAgentStates((prev) => ({ ...prev, [evt.agent]: { status: "done", msg: evt.msg, toolCalls: evt.toolCalls ?? 0 } }));
               break;
-
             case "design_chunk":
               fullText += evt.chunk ?? "";
               setEditorValue(cleanDisplay(fullText));
               break;
-
             case "pipeline_complete":
+              // Use the server's authoritative fullText and simType
               fullText = evt.fullText ?? fullText;
-              setPipelineMeta((prev) => ({
-                ...prev,
-                totalToolCalls: evt.totalToolCalls ?? 0,
-                ragUsed: evt.ragUsed ?? false,
-              }));
+              if (evt.simType) classifiedSimType = evt.simType;
+              setPipelineMeta((prev) => ({ ...prev, totalToolCalls: evt.totalToolCalls ?? 0, ragUsed: evt.ragUsed ?? false }));
               break;
-
             case "error":
               console.error("[agent-pipeline]", evt.message);
               break;
@@ -430,46 +345,47 @@ export default function PhysicsEditorPage() {
         }
       }
 
-      // Parse + apply SIMCONFIG
+      // Parse SIMCONFIG from the generated text. Fall back to the research-classified simType.
       const config = parseSIMCONFIG(fullText);
+      const knownTypes = ["wind_turbine","pendulum","newton_cradle","inverted_pendulum","projectile","rocket","spring_mass","orbit","robot_arm","bridge","water_bottle","airplane","helicopter","mechanical_gears","bicycle","submarine","breadboard","f1_car","steam_engine"];
+      const finalSimType = config?.simType || classifiedSimType || "custom";
+
       if (config) {
         setSimConfig(config);
         const initialVars = {};
         for (const p of config.params || []) initialVars[p.name] = p.default;
         setVars(initialVars);
+      } else {
+        // Build a minimal simConfig from the classified simType so graphs and scene work
+        setSimConfig({ simType: finalSimType, displayName: topic, params: [], constraints: [], optimalParams: {} });
       }
 
-      // Final clean display
       const finalDisplay = cleanDisplay(fullText);
       setEditorValue(finalDisplay);
       const parsedVars = parseParams(finalDisplay);
       if (Object.keys(parsedVars).length > 0) setVars(parsedVars);
 
-      const journalTitle = topic.replace(/\s+/g, " ").trim().slice(0, 72) || "Study";
-      renameJournal(activeId, journalTitle);
+      renameJournal(activeId, topic.replace(/\s+/g, " ").trim().slice(0, 72) || "Study");
 
-      // For custom/unknown sim types, generate a reactive R3F scene component in the background.
-      const finalSimType = parseSIMCONFIG(fullText)?.simType || "custom";
-      const knownTypes = [
-        "wind_turbine", "pendulum", "newton_cradle", "inverted_pendulum",
-        "projectile", "rocket", "spring_mass", "orbit", "robot_arm", "bridge",
-        "water_bottle", "airplane", "helicopter", "mechanical_gears", "bicycle",
-        "submarine", "breadboard", "f1_car", "steam_engine",
-      ];
       if (!knownTypes.includes(finalSimType)) {
         setSceneCode(null);
         generateSceneCode(topic, finalSimType, parseParams(cleanDisplay(fullText)), null);
       }
+
+      // Always fire artifact generation — runs in background, non-blocking
+      generateArtifacts(finalDisplay, finalSimType, topic, parsedVars);
+
     } catch (err) {
       console.error("generateNotes error:", err);
-      setEditorValue(`## Error\nFailed to generate notes. Please try again.`);
+      setEditorValue(`## Error\nFailed to generate notes. ${String(err).includes("fetch") ? "Network error — check your connection." : "Please try again."}`);
     } finally {
       setStreaming(false);
       setTopicInput("");
     }
-  }, [topicInput, quality, difficulty, streaming, activeId, setEditorValue, setVars, setSimConfig, setSceneCode, setTopic, renameJournal]);
+  }, [topicInput, quality, difficulty, streaming, activeId, setEditorValue, setVars, setSimConfig, setSceneCode, setTopic, renameJournal, generateArtifacts]);
 
-  // ── Generate an R3F scene component (SSE streaming agent) ──────────────────
+  // ── Generate scene code ───────────────────────────────────────────────────
+
   const generateSceneCode = useCallback(async (topic, simType, params, feedback) => {
     setAgentSteps([]);
     try {
@@ -478,23 +394,12 @@ export default function PhysicsEditorPage() {
       const res = await fetch("/api/generate-scene", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          topic,
-          simType: simType || "custom",
-          params: params || vars,
-          physicsContext: `Physics simulation for ${topic}. ${feedback || ""}`,
-          feedback: feedback || "",
-          accuracyHistory,
-        }),
+        body: JSON.stringify({ topic, simType: simType || "custom", params: params || vars, physicsContext: `Physics simulation for ${topic}. ${feedback || ""}`, feedback: feedback || "", accuracyHistory }),
       });
-
-      if (!res.body) { console.warn("[generate-scene] no body"); return; }
-
-      const reader  = res.body.getReader();
+      if (!res.body) return;
+      const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      let   buf     = "";
-
-      // eslint-disable-next-line no-constant-condition
+      let buf = "";
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -507,72 +412,219 @@ export default function PhysicsEditorPage() {
             const ev = JSON.parse(line.slice(6));
             if (ev.event === "step") {
               setAgentSteps((prev) => {
-                const idx = prev.findIndex(
-                  (s) => s.tool === ev.tool && s.turn === (ev.turn ?? 0),
-                );
-                if (idx >= 0) {
-                  const next = [...prev];
-                  next[idx] = ev;
-                  return next;
-                }
+                const idx = prev.findIndex((s) => s.tool === ev.tool && s.turn === (ev.turn ?? 0));
+                if (idx >= 0) { const next = [...prev]; next[idx] = ev; return next; }
                 return [...prev, ev];
               });
             } else if (ev.event === "complete") {
               setSceneCode(ev.code);
               setAgentSteps([]);
             } else if (ev.event === "error") {
-              console.warn("[generate-scene] agent error:", ev.error);
               setAgentSteps([]);
             }
-          } catch { /* malformed line, skip */ }
+          } catch { /* malformed */ }
         }
       }
-    } catch (e) {
-      console.warn("[generate-scene] fetch failed:", e);
-      setAgentSteps([]);
-    }
+    } catch (e) { console.warn("[generate-scene]", e); setAgentSteps([]); }
   }, [vars, setSceneCode]);
 
-  // Called by DynamicPhysicsScene when vision score is low or compile fails
   const handleRegenerate = useCallback((feedback) => {
     if (!activeTopic) return;
-    const simType = simConfig?.simType || "custom";
-    setSceneCode(null); // show loading state
-    generateSceneCode(activeTopic, simType, vars, feedback);
+    setSceneCode(null);
+    generateSceneCode(activeTopic, simConfig?.simType || "custom", vars, feedback);
   }, [activeTopic, simConfig, vars, generateSceneCode, setSceneCode]);
 
-  // AUTO-FIX: only fix violated params, leave the rest (e.g. keep user's blade count)
   const handleAutoFix = useCallback(() => {
     if (!simConfig) return;
-    // 1) Patch the editor text so the notes stay consistent.
     const newText = buildAutoFixText(editorValue, simConfig, vars);
     setEditorValue(newText);
-
-    // 2) Directly write the fixed values into vars regardless of text formatting.
-    //    Use case-insensitive lookup so AI key-casing inconsistencies are handled.
     const nextVars = { ...vars };
     for (const constraint of simConfig?.constraints || []) {
       const normKey = normalizeKey(constraint.param);
       const val = vars[normKey] ?? findByKey(vars, constraint.param);
       if (val === undefined) continue;
       if (constraintSeverity(val, constraint) !== "OK") {
-        const optimalVal =
-          findByKey(simConfig?.optimalParams, constraint.param) ??
-          findByKey(simConfig?.optimalParams, normKey) ??
-          simConfig?.params?.find(p => normalizeKey(p.name) === normKey)?.default;
-        if (optimalVal !== undefined) {
-          nextVars[normKey] = optimalVal;
-          nextVars[constraint.param] = optimalVal;
-        }
+        const optimalVal = findByKey(simConfig?.optimalParams, constraint.param) ?? findByKey(simConfig?.optimalParams, normKey) ?? simConfig?.params?.find((p) => normalizeKey(p.name) === normKey)?.default;
+        if (optimalVal !== undefined) { nextVars[normKey] = optimalVal; nextVars[constraint.param] = optimalVal; }
       }
     }
     setVars(nextVars);
   }, [editorValue, simConfig, vars, setEditorValue, setVars]);
 
-  // Derive live indicator
+  // ── Compile wiki ──────────────────────────────────────────────────────────
+  // Compiles a structured wiki article for the CURRENT journal's topic.
+  // Optionally includes related journals for cross-topic connections.
+
+  const compileWiki = useCallback(async () => {
+    if (!active) return;
+    setWikiCompiling(true);
+    try {
+      // Primary: current journal. Secondary: up to 4 related journals for connections.
+      const currentJournal = { topic: active.topic || active.name, name: active.name, editorValue: active.editorValue };
+      const related = journals
+        .filter((j) => j.id !== activeId && j.editorValue?.length > 100 && j.topic)
+        .slice(0, 4)
+        .map((j) => ({ topic: j.topic, name: j.name, editorValue: j.editorValue.slice(0, 800) }));
+
+      const res = await fetch("/api/compile-wiki", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          journals: [currentJournal, ...related],
+          focusTopic: currentJournal.topic,
+        }),
+      });
+      if (!res.ok) return;
+      const { article } = await res.json();
+      if (article) setWikiArticle(article);
+    } catch (err) {
+      console.warn("[compileWiki]", err);
+    } finally {
+      setWikiCompiling(false);
+    }
+  }, [active, activeId, journals, setWikiArticle]);
+
+  // ── Generate notes from source ────────────────────────────────────────────
+  // Triggers the FULL pipeline: notes → SIMCONFIG → scene → artifacts (Python + equations) → wiki
+
+  const generateFromSource = useCallback(async (source) => {
+    setActiveTab("notes");
+
+    if (source.generatedNotes) {
+      // Apply pre-generated notes from analyze_document
+      const display = cleanDisplay(source.generatedNotes);
+      setEditorValue(display);
+
+      const config = parseSIMCONFIG(source.generatedNotes);
+      const knownTypes = ["wind_turbine","pendulum","newton_cradle","inverted_pendulum","projectile","rocket","spring_mass","orbit","robot_arm","bridge","water_bottle","airplane","helicopter","mechanical_gears","bicycle","submarine","breadboard","f1_car","steam_engine"];
+      const sourceTopic = source.detectedTopic?.replace(/_/g, " ") || source.name?.replace(/\.[^.]+$/, "") || "physics";
+      const finalSimType = config?.simType || "custom";
+
+      if (config) {
+        setSimConfig(config);
+        const iv = {};
+        for (const p of config.params || []) iv[p.name] = p.default;
+        setVars(iv);
+      } else {
+        setSimConfig({ simType: finalSimType, displayName: sourceTopic, params: [], constraints: [], optimalParams: {} });
+      }
+
+      const parsedVars = parseParams(display);
+      if (Object.keys(parsedVars).length > 0) setVars(parsedVars);
+
+      renameJournal(activeId, sourceTopic.slice(0, 60));
+      setTopic(sourceTopic);
+
+      // Generate scene if not a built-in type
+      if (!knownTypes.includes(finalSimType)) {
+        setSceneCode(null);
+        generateSceneCode(sourceTopic, finalSimType, parsedVars, null);
+      }
+
+      // Fire the full artifact pipeline in background
+      generateArtifacts(display, finalSimType, sourceTopic, parsedVars);
+
+    } else if (source.name || source.url) {
+      // No pre-generated notes — run the full agent pipeline
+      const topic = source.detectedTopic?.replace(/_/g, " ") || source.name?.replace(/\.[^.]+$/, "") || "physics";
+      generateNotes(topic, "");
+    }
+  }, [setEditorValue, setSimConfig, setVars, renameJournal, activeId, setActiveTab, generateNotes, generateArtifacts, generateSceneCode, setSceneCode, setTopic]);
+
+  // ── Derived values ────────────────────────────────────────────────────────
+
   const liveOk = physicsState.state !== "CRITICAL_FAILURE";
   const simType = simConfig?.simType || null;
   const notesQuality = useMemo(() => evaluateNotesQuality(editorValue, simConfig), [editorValue, simConfig]);
+
+  // ── Tab content renderer ──────────────────────────────────────────────────
+
+  const renderTab = () => {
+    switch (activeTab) {
+      case "notes":
+        return (
+          <div className="flex-1 min-h-0 flex flex-col">
+            {/* Agent pipeline status */}
+            <AgentStatusBar
+              agentStates={agentStates}
+              visible={pipelineMeta.visible}
+              totalToolCalls={pipelineMeta.totalToolCalls}
+              ragUsed={pipelineMeta.ragUsed}
+            />
+            {/* Notes surface */}
+            <div className="flex-1 min-h-0">
+              <InteractiveNotesSurface
+                value={editorValue}
+                onChange={(v) => { setEditorValue(v); setVars(parseParams(v)); }}
+                currentParams={vars}
+                checks={notesQuality.checks}
+              />
+            </div>
+          </div>
+        );
+
+      case "equations":
+        return (
+          <EquationsPanel
+            editorValue={editorValue}
+            params={vars}
+            aiEquations={equations}
+            artifactsGenerating={artifactsGenerating}
+          />
+        );
+
+      case "graphs":
+        return (
+          <GraphsPanel
+            simType={simType}
+            params={vars}
+            onParamChange={(key, val) => mergeVar(key, val)}
+          />
+        );
+
+      case "python":
+        return (
+          <PythonPanel
+            script={pythonScript}
+            onScriptChange={(v) => setPythonScript(v)}
+            topic={activeTopic}
+            artifactsGenerating={artifactsGenerating}
+          />
+        );
+
+      case "learn":
+        return (
+          <LearnPanel
+            editorValue={editorValue}
+            topic={activeTopic}
+            artifactsGenerating={artifactsGenerating}
+          />
+        );
+
+      case "sources":
+        return (
+          <SourcesPanel
+            sources={sources}
+            onAddSource={addSource}
+            onRemoveSource={removeSource}
+            onGenerateFromSource={generateFromSource}
+          />
+        );
+
+      case "wiki":
+        return (
+          <WikiPanel
+            wikiArticle={wikiArticle}
+            journals={journals}
+            onCompile={compileWiki}
+            compiling={wikiCompiling}
+          />
+        );
+
+      default:
+        return null;
+    }
+  };
 
   return (
     <div className="h-[100vh] overflow-hidden bg-[#070A0F] text-white selection:bg-white/20">
@@ -585,21 +637,16 @@ export default function PhysicsEditorPage() {
       `}</style>
 
       {/* Background */}
-      <div className="pointer-events-none fixed inset-0 opacity-[0.65]" style={{
-        background: "radial-gradient(1200px 600px at 70% 20%, rgba(99,102,241,0.22), transparent 55%), radial-gradient(900px 520px at 20% 80%, rgba(16,185,129,0.16), transparent 58%)",
-      }} />
+      <div className="pointer-events-none fixed inset-0 opacity-[0.65]" style={{ background: "radial-gradient(1200px 600px at 70% 20%, rgba(99,102,241,0.22), transparent 55%), radial-gradient(900px 520px at 20% 80%, rgba(16,185,129,0.16), transparent 58%)" }} />
       <div className="pointer-events-none fixed inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.05)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.05)_1px,transparent_1px)] bg-[size:42px_42px] opacity-[0.05]" />
 
       <div className="relative mx-auto h-full max-w-[1440px] px-4 py-4 grid grid-cols-[260px,1fr] gap-4">
-        {/* Left sidebar — journals */}
-        <JournalsNav
-          open={navOpen}
-          onToggle={() => setNavOpen((v) => !v)}
-          onNewJournal={() => createJournal(`Session ${journals.length + 1}`)}
-        />
+        {/* Left sidebar */}
+        <JournalsNav open={navOpen} onToggle={() => setNavOpen((v) => !v)} onNewJournal={() => createJournal(`Session ${journals.length + 1}`)} />
 
         {/* Main area */}
         <div className="min-h-0 grid grid-rows-[auto,1fr] gap-4">
+
           {/* Navbar */}
           <header className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -608,48 +655,31 @@ export default function PhysicsEditorPage() {
               </div>
               <div className="leading-tight min-w-0 max-w-[min(280px,36vw)]">
                 <div className="text-[10px] tracking-[0.18em] uppercase text-white/45">Loomin</div>
-                <div
-                  className="text-[15px] font-semibold text-white/92 whitespace-normal break-words"
-                  title={active?.name ?? "Physics Sandbox"}
-                >
+                <div className="text-[15px] font-semibold text-white/92 whitespace-normal break-words" title={active?.name ?? "Physics Sandbox"}>
                   {active?.name ?? "Physics Sandbox"}
                 </div>
               </div>
             </div>
-
             <div className="flex items-center gap-2">
-              {/* Live indicator */}
               <div className={`flex items-center gap-2 px-3 py-1.5 rounded-xl ring-1 backdrop-blur-md ${liveOk ? "bg-emerald-950/60 ring-emerald-500/30" : "bg-red-950/60 ring-red-500/30"}`}>
                 <div className={`h-2 w-2 rounded-full ${liveOk ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)] animate-pulse" : "bg-red-400 shadow-[0_0_8px_rgba(239,68,68,0.8)] animate-pulse"}`} />
-                <span className={`text-xs font-mono font-semibold ${liveOk ? "text-emerald-400" : "text-red-400"}`}>
-                  {liveOk ? "LIVE" : "ERROR"}
-                </span>
+                <span className={`text-xs font-mono font-semibold ${liveOk ? "text-emerald-400" : "text-red-400"}`}>{liveOk ? "LIVE" : "ERROR"}</span>
               </div>
-
-              {/* System status */}
               <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl ring-1 backdrop-blur-md ${liveOk ? "bg-white/5 ring-white/10" : "bg-red-950/40 ring-red-500/20"}`}>
-                {liveOk
-                  ? <CheckCircle className="h-3.5 w-3.5 text-emerald-400" />
-                  : <AlertTriangle className="h-3.5 w-3.5 text-red-400" />}
-                <span className={`text-xs ${liveOk ? "text-white/60" : "text-red-300"}`}>
-                  {liveOk ? "System Ready" : "Error Detected"}
-                </span>
+                {liveOk ? <CheckCircle className="h-3.5 w-3.5 text-emerald-400" /> : <AlertTriangle className="h-3.5 w-3.5 text-red-400" />}
+                <span className={`text-xs ${liveOk ? "text-white/60" : "text-red-300"}`}>{liveOk ? "System Ready" : "Error Detected"}</span>
               </div>
-
-              {/* Ask AI button */}
-              <button
-                onClick={() => setAskDrawerOpen(true)}
-                className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-indigo-500/15 ring-1 ring-indigo-500/30 hover:bg-indigo-500/25 transition text-xs font-semibold text-indigo-300"
-              >
+              <button onClick={() => setAskDrawerOpen(true)} className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-indigo-500/15 ring-1 ring-indigo-500/30 hover:bg-indigo-500/25 transition text-xs font-semibold text-indigo-300">
                 <Brain className="h-3.5 w-3.5" />
                 Ask AI
               </button>
             </div>
           </header>
 
-          {/* Content grid — dynamic panel widths based on panelMode */}
+          {/* Content grid */}
           <div className="min-h-0 flex gap-4">
-            {/* Left panel — Notes */}
+
+            {/* Left panel */}
             {panelMode !== "sandbox-only" && (
               <motion.section
                 initial={{ opacity: 0, y: 10 }}
@@ -657,148 +687,116 @@ export default function PhysicsEditorPage() {
                 transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
                 className="min-h-0 flex-1 overflow-hidden relative z-20"
               >
-              <div className="h-full min-h-0 rounded-3xl bg-white/[0.05] ring-1 ring-white/12 backdrop-blur-xl overflow-hidden flex flex-col">
-                {/* Topic input bar */}
-                <div className="flex-shrink-0 px-4 py-3 border-b border-white/10">
-                  <div className="flex items-center gap-2">
-                    <div className="flex items-center gap-1.5 flex-shrink-0">
-                      <Sparkles className="h-3.5 w-3.5 text-indigo-400" />
-                      <span className="text-xs font-semibold text-white/70">Topic</span>
-                    </div>
-                    <input
-                      value={topicInput}
-                      onChange={(e) => setTopicInput(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && generateNotes()}
-                      placeholder="e.g. pendulum, wind turbine, projectile…"
-                      disabled={streaming}
-                      className="flex-1 bg-white/5 rounded-lg px-3 py-1.5 text-xs text-white/90 placeholder:text-white/30 outline-none ring-1 ring-white/10 focus:ring-indigo-500/50 transition disabled:opacity-50"
-                    />
-                    <button
-                      onClick={generateNotes}
-                      disabled={streaming || !topicInput.trim()}
-                      className="h-8 w-8 rounded-lg bg-indigo-500/20 ring-1 ring-indigo-500/30 hover:bg-indigo-500/30 disabled:opacity-40 disabled:cursor-not-allowed transition flex items-center justify-center flex-shrink-0"
-                    >
-                      {streaming ? (
-                        <Loader2 className="h-3.5 w-3.5 text-indigo-400 animate-spin" />
-                      ) : (
-                        <Send className="h-3.5 w-3.5 text-indigo-400" />
-                      )}
-                    </button>
-                    {/* Collapse notes → sandbox-only */}
-                    <button
-                      onClick={() => setPanelMode(panelMode === "notes-only" ? "both" : "notes-only")}
-                      title={panelMode === "notes-only" ? "Show sandbox" : "Fullscreen notes"}
-                      className="p-1.5 rounded-lg hover:bg-white/8 text-white/30 hover:text-white/65 transition flex-shrink-0"
-                    >
-                      {panelMode === "notes-only" ? <PanelRightOpen className="h-3.5 w-3.5" /> : <PanelRightClose className="h-3.5 w-3.5" />}
-                    </button>
-                  </div>
+                <div className="h-full min-h-0 rounded-3xl bg-white/[0.05] ring-1 ring-white/12 backdrop-blur-xl overflow-hidden flex flex-col">
 
-                  {/* HQ / Fast toggle + model indicator */}
-                  <div className="flex items-center justify-between mt-2">
-                    <div className="flex items-center gap-1 p-0.5 rounded-lg bg-white/5 ring-1 ring-white/10">
-                      <button
-                        onClick={() => setQuality("thinking")}
-                        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
-                          quality === "thinking"
-                            ? "bg-violet-600/40 ring-1 ring-violet-500/50 text-violet-300"
-                            : "text-white/40 hover:text-white/60"
-                        }`}
-                      >
-                        <Brain className="h-3 w-3" />
-                        High Quality
-                      </button>
-                      <button
-                        onClick={() => setQuality("fast")}
-                        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
-                          quality === "fast"
-                            ? "bg-amber-600/40 ring-1 ring-amber-500/50 text-amber-300"
-                            : "text-white/40 hover:text-white/60"
-                        }`}
-                      >
-                        <Zap className="h-3 w-3" />
-                        Fast
-                      </button>
-                    </div>
-                    <span className="text-[10px] text-white/25 font-mono">
-                      {quality === "thinking" ? "nemotron-ultra / llama-70b" : "nemotron-nano / llama-8b"}
-                    </span>
-                  </div>
-
-                  {/* Difficulty slider */}
-                  <div className="mt-2 flex items-center justify-between">
-                    <div className="text-[11px] text-white/55 font-semibold">Difficulty</div>
-                    <div className="flex items-center gap-3">
-                      <input
-                        type="range"
-                        min={0}
-                        max={3}
-                        step={1}
-                        value={difficulty}
-                        onChange={(e) => setDifficulty(Number(e.target.value))}
-                        disabled={streaming}
-                        className="w-28 accent-indigo-400"
-                      />
-                      <span className="text-[11px] font-mono text-white/70">
-                        {difficulty === 0 ? "Beginner" : difficulty === 1 ? "Intermediate" : difficulty === 2 ? "Advanced" : "PhD"}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Factual quality */}
-                <div className="flex-shrink-0 px-4 py-2 border-b border-white/8 flex items-center justify-between gap-3">
-                  <div className="text-[11px] text-white/55">
-                    Rich Notes Surface (click any block to edit inline)
-                  </div>
-
-                  <div className={`flex items-center gap-2 text-[11px] px-2.5 py-1 rounded-lg ring-1 ${
-                    notesQuality.score >= 80
-                      ? "bg-emerald-950/40 ring-emerald-500/25 text-emerald-300"
-                      : "bg-amber-950/35 ring-amber-500/25 text-amber-300"
-                  }`}>
-                    {notesQuality.score >= 80 ? <ShieldCheck className="h-3.5 w-3.5" /> : <ShieldAlert className="h-3.5 w-3.5" />}
-                    Factual Guard: {notesQuality.score}%
-                  </div>
-                </div>
-
-                {/* Agent pipeline status bar */}
-                <AgentStatusBar
-                  agentStates={agentStates}
-                  visible={pipelineMeta.visible}
-                  totalToolCalls={pipelineMeta.totalToolCalls}
-                  ragUsed={pipelineMeta.ragUsed}
-                />
-
-                {/* Notes area — single preview+edit surface */}
-                <div className="flex-1 min-h-0">
-                  <InteractiveNotesSurface
-                    value={editorValue}
-                    onChange={(v) => {
-                      setEditorValue(v);
-                      const parsed = parseParams(v);
-                      setVars(parsed);
-                    }}
-                    currentParams={vars}
-                    checks={notesQuality.checks}
-                  />
-                </div>
-
-                {/* Params summary bar */}
-                {simConfig && (
-                  <div className="flex-shrink-0 border-t border-white/8 px-4 py-2 flex items-center gap-3 overflow-x-auto">
-                    {(simConfig.params || []).slice(0, 4).map((p) => (
-                      <div key={p.name} className="flex items-center gap-1.5 flex-shrink-0">
-                        <span className="text-[10px] text-white/40">{p.label || p.name}</span>
-                        <span className="text-[10px] font-mono font-bold text-cyan-400">
-                          {vars[p.name] ?? p.default}
-                        </span>
-                        <span className="text-[10px] text-white/30">{p.unit}</span>
+                  {/* Topic input bar */}
+                  <div className="flex-shrink-0 px-4 py-3 border-b border-white/10">
+                    <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1.5 flex-shrink-0">
+                        <Sparkles className="h-3.5 w-3.5 text-indigo-400" />
+                        <span className="text-xs font-semibold text-white/70">Topic</span>
                       </div>
-                    ))}
+                      <input
+                        value={topicInput}
+                        onChange={(e) => setTopicInput(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && generateNotes()}
+                        placeholder="e.g. pendulum, wind turbine, projectile…"
+                        disabled={streaming}
+                        className="flex-1 bg-white/5 rounded-lg px-3 py-1.5 text-xs text-white/90 placeholder:text-white/30 outline-none ring-1 ring-white/10 focus:ring-indigo-500/50 transition disabled:opacity-50"
+                      />
+                      <button
+                        onClick={() => generateNotes()}
+                        disabled={streaming || !topicInput.trim()}
+                        className="h-8 w-8 rounded-lg bg-indigo-500/20 ring-1 ring-indigo-500/30 hover:bg-indigo-500/30 disabled:opacity-40 disabled:cursor-not-allowed transition flex items-center justify-center flex-shrink-0"
+                      >
+                        {streaming ? <Loader2 className="h-3.5 w-3.5 text-indigo-400 animate-spin" /> : <Send className="h-3.5 w-3.5 text-indigo-400" />}
+                      </button>
+                      <button
+                        onClick={() => setPanelMode(panelMode === "notes-only" ? "both" : "notes-only")}
+                        title={panelMode === "notes-only" ? "Show sandbox" : "Fullscreen notes"}
+                        className="p-1.5 rounded-lg hover:bg-white/8 text-white/30 hover:text-white/65 transition flex-shrink-0"
+                      >
+                        {panelMode === "notes-only" ? <PanelRightOpen className="h-3.5 w-3.5" /> : <PanelRightClose className="h-3.5 w-3.5" />}
+                      </button>
+                    </div>
+
+                    {/* HQ / Fast + difficulty */}
+                    <div className="flex items-center justify-between mt-2 gap-3">
+                      <div className="flex items-center gap-1 p-0.5 rounded-lg bg-white/5 ring-1 ring-white/10">
+                        <button onClick={() => setQuality("thinking")} className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${quality === "thinking" ? "bg-violet-600/40 ring-1 ring-violet-500/50 text-violet-300" : "text-white/40 hover:text-white/60"}`}>
+                          <Brain className="h-3 w-3" /> High Quality
+                        </button>
+                        <button onClick={() => setQuality("fast")} className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${quality === "fast" ? "bg-amber-600/40 ring-1 ring-amber-500/50 text-amber-300" : "text-white/40 hover:text-white/60"}`}>
+                          <Zap className="h-3 w-3" /> Fast
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <span className="text-[11px] text-white/45">Level</span>
+                        <input type="range" min={0} max={3} step={1} value={difficulty} onChange={(e) => setDifficulty(Number(e.target.value))} disabled={streaming} className="w-20 accent-indigo-400" />
+                        <span className="text-[11px] font-mono text-white/60 w-16">{["Beginner","Intermediate","Advanced","PhD"][difficulty]}</span>
+                      </div>
+                    </div>
                   </div>
-                )}
-              </div>
+
+                  {/* Tab bar */}
+                  <div className="flex-shrink-0 flex items-center gap-0.5 px-3 py-1.5 border-b border-white/8 overflow-x-auto">
+                    {TABS.map(({ id, label, Icon }) => {
+                      const isActive = activeTab === id;
+                      const hasBadge = (id === "equations" && equations.length > 0) ||
+                                       (id === "sources"   && sources.length > 0) ||
+                                       (id === "python"    && !!pythonScript) ||
+                                       (id === "wiki"      && !!wikiArticle);
+                      return (
+                        <button
+                          key={id}
+                          onClick={() => setActiveTab(id)}
+                          className={`relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold whitespace-nowrap transition flex-shrink-0 ${
+                            isActive
+                              ? "bg-white/10 ring-1 ring-white/15 text-white"
+                              : "text-white/40 hover:text-white/65 hover:bg-white/5"
+                          }`}
+                        >
+                          <Icon className={`h-3.5 w-3.5 ${isActive ? "text-indigo-400" : ""}`} />
+                          {label}
+                          {hasBadge && !isActive && (
+                            <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-indigo-400" />
+                          )}
+                          {(id === "equations" || id === "python") && artifactsGenerating && (
+                            <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                          )}
+                        </button>
+                      );
+                    })}
+
+                    {/* Factual guard badge — only on Notes tab */}
+                    {activeTab === "notes" && (
+                      <div className={`ml-auto flex-shrink-0 flex items-center gap-1.5 text-[10px] px-2 py-1 rounded-lg ring-1 ${
+                        notesQuality.score >= 80 ? "bg-emerald-950/40 ring-emerald-500/25 text-emerald-300" : "bg-amber-950/35 ring-amber-500/25 text-amber-300"
+                      }`}>
+                        {notesQuality.score >= 80 ? <ShieldCheck className="h-3 w-3" /> : <ShieldAlert className="h-3 w-3" />}
+                        {notesQuality.score}%
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Tab content */}
+                  <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+                    {renderTab()}
+                  </div>
+
+                  {/* Params summary bar */}
+                  {simConfig && (
+                    <div className="flex-shrink-0 border-t border-white/8 px-4 py-2 flex items-center gap-3 overflow-x-auto">
+                      {(simConfig.params || []).slice(0, 4).map((p) => (
+                        <div key={p.name} className="flex items-center gap-1.5 flex-shrink-0">
+                          <span className="text-[10px] text-white/40">{p.label || p.name}</span>
+                          <span className="text-[10px] font-mono font-bold text-cyan-400">{vars[p.name] ?? p.default}</span>
+                          <span className="text-[10px] text-white/30">{p.unit}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </motion.section>
             )}
 
@@ -810,96 +808,69 @@ export default function PhysicsEditorPage() {
                 transition={{ delay: 0.02, duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
                 className="min-h-0 flex-1 overflow-hidden relative z-0"
               >
-              <div className="h-full min-h-0 rounded-3xl bg-white/[0.05] ring-1 ring-white/12 backdrop-blur-xl overflow-hidden grid grid-rows-[auto,1fr]">
-                {/* Sandbox header */}
-                <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
-                  <div className="flex items-center gap-3">
-                    {/* Expand-notes button */}
-                    <button
-                      onClick={() => setPanelMode(panelMode === "sandbox-only" ? "both" : "sandbox-only")}
-                      title={panelMode === "sandbox-only" ? "Show notes panel" : "Hide notes panel"}
-                      className="p-1.5 rounded-lg hover:bg-white/8 text-white/35 hover:text-white/70 transition"
-                    >
-                      {panelMode === "sandbox-only" ? <PanelLeftOpen className="h-3.5 w-3.5" /> : <PanelLeftClose className="h-3.5 w-3.5" />}
-                    </button>
-                    <div className="text-sm font-semibold text-white/90">3D Sandbox</div>
-                    <div className="px-2 py-0.5 rounded-md bg-white/8 text-[10px] text-white/50 font-mono">
-                      {simConfig?.displayName || simType || "No simulation"}
+                <div className="h-full min-h-0 rounded-3xl bg-white/[0.05] ring-1 ring-white/12 backdrop-blur-xl overflow-hidden grid grid-rows-[auto,1fr]">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
+                    <div className="flex items-center gap-3">
+                      <button onClick={() => setPanelMode(panelMode === "sandbox-only" ? "both" : "sandbox-only")} className="p-1.5 rounded-lg hover:bg-white/8 text-white/35 hover:text-white/70 transition">
+                        {panelMode === "sandbox-only" ? <PanelLeftOpen className="h-3.5 w-3.5" /> : <PanelLeftClose className="h-3.5 w-3.5" />}
+                      </button>
+                      <div className="text-sm font-semibold text-white/90">3D Sandbox</div>
+                      <div className="px-2 py-0.5 rounded-md bg-white/8 text-[10px] text-white/50 font-mono">
+                        {simConfig?.displayName || simType || "No simulation"}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap justify-end">
+                      {simType && (
+                        <div className="flex items-center gap-1 mr-1">
+                          <span className="text-[9px] text-white/35 uppercase tracking-wide hidden sm:inline">Visual</span>
+                          <button
+                            type="button"
+                            onClick={() => recordVisualAccuracy(true, activeTopic, simType)}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-[10px] font-medium transition"
+                          >
+                            <ThumbsUp className="h-3 w-3" /> Accurate
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              recordVisualAccuracy(false, activeTopic, simType);
+                              if (sceneCode) {
+                                setSceneCode(null);
+                                generateSceneCode(activeTopic, simType, vars, "USER MARKED THE 3D VISUAL AS INACCURATE. Rebuild from scratch with correct geometry.");
+                              }
+                            }}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-[10px] font-medium transition"
+                          >
+                            <ThumbsDown className="h-3 w-3" /> Off
+                          </button>
+                        </div>
+                      )}
+                      <span className="text-[10px] text-white/30">Drag to orbit</span>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 flex-wrap justify-end">
-                    {simType && (
-                      <div className="flex items-center gap-1 mr-1">
-                        <span className="text-[9px] text-white/35 uppercase tracking-wide hidden sm:inline">Visual</span>
-                        <button
-                          type="button"
-                          title="This 3D model matches the topic — we’ll prefer this style in future generations"
-                          onClick={() => recordVisualAccuracy(true, activeTopic, simType)}
-                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-[10px] font-medium transition"
-                        >
-                          <ThumbsUp className="h-3 w-3" />
-                          Accurate
-                        </button>
-                        <button
-                          type="button"
-                          title="Doesn’t match — logs feedback and regenerates the AI scene with stricter geometry rules"
-                          onClick={() => {
-                            recordVisualAccuracy(false, activeTopic, simType);
-                            if (sceneCode) {
-                              setSceneCode(null);
-                              generateSceneCode(
-                                activeTopic,
-                                simType,
-                                vars,
-                                "USER MARKED THE 3D VISUAL AS INACCURATE. Rebuild from scratch. Mandatory: follow Y-up, ground disc at y=0; vehicles need VERTICAL wheels (rotation [Math.PI/2,0,0] on torus/cylinder); gears need radial tooth meshes in a loop with cos/sin; minimum 28 mesh elements; must be recognisable as the topic.",
-                              );
-                            }
-                          }}
-                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-[10px] font-medium transition"
-                        >
-                          <ThumbsDown className="h-3 w-3" />
-                          Off
-                        </button>
-                      </div>
-                    )}
-                    <span className="text-[10px] text-white/30">Drag to orbit</span>
+
+                  <div className="relative min-h-0 bg-[#050810]" style={{ paddingBottom: simConfig?.params?.length ? `${52 + simConfig.params.length * 40}px` : 0 }}>
+                    <PhysicsScene
+                      simType={simType}
+                      params={vars}
+                      simConfig={simConfig}
+                      topic={activeTopic}
+                      sceneCode={sceneCode}
+                      onRegenerate={handleRegenerate}
+                      agentSteps={agentSteps}
+                    />
+                    <AnimatePresence mode="wait">
+                      <StatusCard key={physicsState.state} physicsState={physicsState} onAutoFix={handleAutoFix} />
+                    </AnimatePresence>
+                    <ParamSliderPanel
+                      simConfig={simConfig}
+                      currentParams={vars}
+                      editorValue={editorValue}
+                      onParamChange={(key, val) => mergeVar(key, val)}
+                      onEditorChange={(v) => { setEditorValue(v); setVars(parseParams(v)); }}
+                    />
                   </div>
                 </div>
-
-                {/* Canvas + overlays */}
-                <div className="relative min-h-0 bg-[#050810]" style={{ paddingBottom: simConfig?.params?.length ? `${52 + simConfig.params.length * 40}px` : 0 }}>
-                  <PhysicsScene
-                    simType={simType}
-                    params={vars}
-                    simConfig={simConfig}
-                    topic={activeTopic}
-                    sceneCode={sceneCode}
-                    onRegenerate={handleRegenerate}
-                    agentSteps={agentSteps}
-                  />
-
-                  {/* Status card overlay */}
-                  <AnimatePresence mode="wait">
-                    <StatusCard
-                      key={physicsState.state}
-                      physicsState={physicsState}
-                      onAutoFix={handleAutoFix}
-                    />
-                  </AnimatePresence>
-
-                  {/* Parameter sliders pinned to sandbox bottom */}
-                  <ParamSliderPanel
-                    simConfig={simConfig}
-                    currentParams={vars}
-                    editorValue={editorValue}
-                    onParamChange={(key, val) => mergeVar(key, val)}
-                    onEditorChange={(v) => {
-                      setEditorValue(v);
-                      setVars(parseParams(v));
-                    }}
-                  />
-                </div>
-              </div>
               </motion.section>
             )}
           </div>
@@ -912,63 +883,14 @@ export default function PhysicsEditorPage() {
         onClose={() => setAskDrawerOpen(false)}
         simConfig={simConfig}
         currentParams={vars}
+        editorValue={editorValue}
         onGenerateNotes={async (topic) => {
           setAskDrawerOpen(false);
-          setStreaming(true);
-          setTopic(topic);
-          setEditorValue(`## Generating: ${topic}\n\n_Initialising multi-agent pipeline…_\n`);
-          const idle = { status: "idle", msg: "", toolCalls: 0 };
-          setAgentStates({ research: idle, design: idle, validator: idle });
-          setPipelineMeta({ totalToolCalls: 0, ragUsed: false, visible: true });
-          try {
-            const res = await fetch("/api/agent-pipeline", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ topic, quality, difficulty }),
-            });
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
-            let buf = "";
-            let fullText = "";
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              buf += decoder.decode(value, { stream: true });
-              const lines = buf.split("\n");
-              buf = lines.pop() ?? "";
-              for (const line of lines) {
-                if (!line.startsWith("data: ")) continue;
-                let evt;
-                try { evt = JSON.parse(line.slice(6)); } catch { continue; }
-                if (evt.event === "agent_start")
-                  setAgentStates((p) => ({ ...p, [evt.agent]: { status: "running", msg: evt.msg, toolCalls: 0 } }));
-                else if (evt.event === "agent_complete")
-                  setAgentStates((p) => ({ ...p, [evt.agent]: { status: "done", msg: evt.msg, toolCalls: evt.toolCalls ?? 0 } }));
-                else if (evt.event === "design_chunk") { fullText += evt.chunk ?? ""; setEditorValue(cleanDisplay(fullText)); }
-                else if (evt.event === "pipeline_complete") {
-                  fullText = evt.fullText ?? fullText;
-                  setPipelineMeta((p) => ({ ...p, totalToolCalls: evt.totalToolCalls ?? 0, ragUsed: evt.ragUsed ?? false }));
-                }
-              }
-            }
-            const config = parseSIMCONFIG(fullText);
-            if (config) {
-              setSimConfig(config);
-              const iv = {};
-              for (const p of config.params || []) iv[p.name] = p.default;
-              setVars(iv);
-            }
-            const finalDisplay = cleanDisplay(fullText);
-            setEditorValue(finalDisplay);
-            const parsedVars = parseParams(finalDisplay);
-            if (Object.keys(parsedVars).length > 0) setVars(parsedVars);
-          } catch (err) {
-            console.error(err);
-          } finally {
-            setStreaming(false);
-          }
+          await generateNotes(topic);
         }}
       />
     </div>
   );
 }
+
+

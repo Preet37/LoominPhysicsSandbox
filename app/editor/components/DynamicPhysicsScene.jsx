@@ -10,7 +10,7 @@
 import React, { useMemo, useRef, useState, useEffect } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
-import { Html } from "@react-three/drei";
+import { Html, Environment, Line, Text } from "@react-three/drei";
 
 /**
  * LLMs often emit useMemo(fn, undefined) — React requires an array.
@@ -50,31 +50,63 @@ function useFrameSafe(callback, priority) {
   }, priority);
 }
 
+/**
+ * Pre-flight sanitizer: fix common LLM substitution mistakes before eval.
+ * Runs BEFORE new Function() so bad names never hit the runtime.
+ */
+function sanitizeGeneratedCode(code) {
+  return code
+    // LLMs sometimes write useFrameR3F (wrong) instead of useFrame
+    .replace(/\buseFrameR3F\b/g, "useFrame")
+    // LLMs sometimes write useR3FThree / useR3F instead of useThree
+    .replace(/\buseR3FThree\b/g, "useThree")
+    .replace(/\buseR3F\b/g, "useThree")
+    // LLMs sometimes write useThreeContext
+    .replace(/\buseThreeContext\b/g, "useThree")
+    // LLMs sometimes import useFrame from 'react' — the import is stripped, variable stays
+    .replace(/\bReact\.useFrame\b/g, "useFrame")
+    // Remove leftover import/require statements the strip tool might have missed
+    .replace(/^const\s+\{[^}]+\}\s*=\s*require\(['"][^'"]+['"]\)\s*;?\s*$/gm, "")
+    .replace(/^import\s+.+\s+from\s+['"][^'"]+['"]\s*;?\s*$/gm, "");
+}
+
 // ── safe evaluator ────────────────────────────────────────────────────────────
 function compileScene(code) {
   if (!code || !code.trim()) return { Component: null, error: "No code provided" };
   try {
+    const sanitized = sanitizeGeneratedCode(code);
+
     // eslint-disable-next-line no-new-func
     const factory = new Function(
       "React",
-      "useFrame",    // → useFrameSafe  (injected below)
+      "useFrame",       // → useFrameSafe
       "useRef",
       "useState",
       "useEffect",
-      "useMemo",     // → useMemoSafe   (injected below)
+      "useMemo",        // → useMemoSafe
       "THREE",
-      `${code}
+      "useThree",       // @react-three/fiber — read camera, gl, scene
+      "useFrameR3F",    // alias → useFrameSafe (LLM compat)
+      "Html",           // @react-three/drei
+      "Line",           // @react-three/drei
+      "Text",           // @react-three/drei
+      `${sanitized}
       if (typeof GeneratedScene !== 'undefined') return GeneratedScene;
       throw new Error('GeneratedScene function not found in generated code');`
     );
     const Component = factory(
       React,
-      useFrameSafe,  // wraps in try/catch — survives .forEach-on-null errors
+      useFrameSafe,   // wraps in try/catch
       useRef,
       useState,
       useEffect,
-      useMemoSafe,   // normalises bad deps arrays
+      useMemoSafe,    // normalises bad deps arrays
       THREE,
+      useThree,       // R3F context hook
+      useFrameSafe,   // useFrameR3F alias
+      Html,           // drei Html overlay
+      Line,           // drei Line
+      Text,           // drei Text
     );
     if (typeof Component !== "function") throw new Error("GeneratedScene is not a function");
     return { Component, error: null };
@@ -107,7 +139,15 @@ function VisionVerifier({ topic, onScore }) {
         body: JSON.stringify({ description: topic, imageBase64: base64 }),
       })
         .then((r) => r.json())
-        .then((d) => onScore(d?.score ?? 75))
+        .then((d) => {
+          const score = d?.score ?? 75;
+          onScore(score);
+          // If score is low, attach Gemini's specific issues to the regenerate feedback
+          if (score < 55 && d?.issues?.length) {
+            window.__lastVisionIssues = d.issues;
+            window.__lastVisionSuggestions = d.suggestions || [];
+          }
+        })
         .catch(() => onScore(75));
     } catch {
       onScore(75);
@@ -211,12 +251,22 @@ export default function DynamicPhysicsScene({
   useEffect(() => {
     if (score === null) return;
     if (score >= 75) setScoreLabel("");
-    else if (score >= 50) setScoreLabel(`Scene score ${score}/100 — quality may be low`);
+    else if (score >= 55) setScoreLabel(`Scene score ${score}/100 — quality may be low`);
     else setScoreLabel(`Score ${score}/100 — scene inaccurate`);
 
-    // Auto-regenerate once if score is very low
-    if (score < 45 && onRegenerate) {
-      onRegenerate(`Scene rendered with score ${score}/100. Please generate more accurate geometry.`);
+    // Auto-regenerate once if score is below 55 — Gemini vision says it doesn't look right
+    if (score < 55 && onRegenerate) {
+      const visionIssues = window.__lastVisionIssues || [];
+      const visionSuggestions = window.__lastVisionSuggestions || [];
+      const issueBlock = visionIssues.length
+        ? `\nGemini vision issues:\n${visionIssues.map((i) => `• ${i}`).join("\n")}`
+        : "";
+      const suggestBlock = visionSuggestions.length
+        ? `\nSuggestions:\n${visionSuggestions.map((s) => `• ${s}`).join("\n")}`
+        : "";
+      onRegenerate(
+        `Gemini vision scored the rendered scene ${score}/100 — it does not look accurate enough. Rebuild with more precise geometry matching the real object.${issueBlock}${suggestBlock}`,
+      );
     }
   }, [score, onRegenerate]);
 

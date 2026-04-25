@@ -27,7 +27,7 @@ import Groq from "groq-sdk";
 import { transform as sucraseTransform } from "sucrase";
 
 const NVIDIA_BASE    = "https://integrate.api.nvidia.com/v1";
-const NVIDIA_MODEL   = "nvidia/llama-3.1-nemotron-ultra-253b-v1";
+const NVIDIA_MODEL   = "meta/llama-3.1-405b-instruct";
 const REVIEW_MODEL   = "llama-3.3-70b-versatile";
 const MAX_AGENT_TURNS = 4;
 
@@ -51,9 +51,25 @@ function stripImportsExports(code: string): string {
     .trim();
 }
 
+/**
+ * Server-side code sanitizer: fix LLM alias mistakes before any audit or
+ * transform runs. These substitutions are safe because the correct names are
+ * injected into the client sandbox by DynamicPhysicsScene.
+ */
+function sanitizeCode(raw: string): string {
+  return raw
+    .replace(/\buseFrameR3F\b/g, "useFrame")
+    .replace(/\buseR3FThree\b/g, "useThree")
+    .replace(/\buseR3F\b/g, "useThree")
+    .replace(/\buseThreeContext\b/g, "useThree")
+    .replace(/\bReact\.useFrame\b/g, "useFrame");
+}
+
 /** Tool 1: strip — clean fences, imports, assert GeneratedScene present. */
 function toolStrip(rawCode: string): { code: string; issues: string[] } {
-  const code = stripImportsExports(stripFences(rawCode));
+  const stripped = stripImportsExports(stripFences(rawCode));
+  // Auto-fix known LLM alias mistakes before auditing
+  const code = sanitizeCode(stripped);
   const issues: string[] = [];
   if (!code.includes("GeneratedScene")) {
     issues.push(
@@ -92,6 +108,8 @@ function toolTransform(code: string): { transformed: string | null; issues: stri
 /** Tool 4: compile — new Function() parse in Node. Catches JS errors before client eval. */
 function toolCompile(transformedCode: string): { issues: string[] } {
   try {
+    // Mirror the sandbox params in DynamicPhysicsScene exactly so compile errors
+    // match what the client will see at runtime.
     // eslint-disable-next-line no-new-func
     new Function(
       "React",
@@ -101,6 +119,11 @@ function toolCompile(transformedCode: string): { issues: string[] } {
       "useEffect",
       "useMemo",
       "THREE",
+      "useThree",       // @react-three/fiber (commonly used by LLMs)
+      "useFrameR3F",    // alias for useFrame (LLM compat — sanitized before this, but keep as fallback)
+      "Html",           // @react-three/drei
+      "Line",           // @react-three/drei
+      "Text",           // @react-three/drei
       `${transformedCode}\nreturn typeof GeneratedScene !== 'undefined' ? GeneratedScene : null;`,
     );
     return { issues: [] };
@@ -152,10 +175,25 @@ SELF-CHECK before output:
 2. If gears, confirm multiple tooth meshes in a loop with sin/cos.
 3. Confirm ground circle at y=0 exists.
 
+AVAILABLE SANDBOX GLOBALS — these are the ONLY names you can use:
+  React, useRef, useState, useEffect, useMemo  ← from React
+  useFrame(callback, priority?)                ← from @react-three/fiber (for animation)
+  useThree()                                   ← from @react-three/fiber (returns { gl, camera, scene, size, ... })
+  THREE                                        ← from three.js (THREE.MathUtils, THREE.Vector3, etc.)
+  Html, Line, Text                             ← from @react-three/drei
+
+CRITICAL — DO NOT USE THESE (they do not exist in the sandbox):
+  ❌ useFrameR3F  → use useFrame
+  ❌ useR3FThree  → use useThree
+  ❌ useThreeContext → use useThree
+  ❌ React.useFrame → use useFrame directly
+  ❌ Any import statement — all are STRIPPED. Never write import/require.
+  ❌ OrbitControls, Stars, Sky, MeshReflectorMaterial — not available.
+
 REACT HOOKS (runtime — invalid hooks crash the canvas):
 - useMemo(fn, DEPS) and useCallback(fn, DEPS): DEPS must be an ARRAY: [] or [x, y]. NEVER undefined, null, or a bare object.
 - Prefer useMemo(() => [...], []) for stable arrays; never useMemo(fn, params) unless params is wrapped: [params].
-- useFrame only from @react-three/fiber; do not import useFrame from "react".
+- useFrame only — never setInterval or setTimeout inside a component.
 
 REFS USED AS ARRAYS — common crash in useFrame:
 - WRONG: const lines = useRef(); ... useFrame(() => { lines.current.forEach(...) }); // current is undefined on frame 1
@@ -184,18 +222,33 @@ function staticRuntimeAudit(code: string): string[] {
     issues.push("RUNTIME: useCallback(..., null) is INVALID — use [].");
   }
 
-  // Refs used as arrays without null guard — common crash in useFrame
-  // Pattern: someRef.current.forEach / .map / .filter / .reduce
-  const refArrayCalls = code.match(/\b(\w+Ref|ref\w*|Ref\w*)\.current\.(forEach|map|filter|reduce|find|some|every)\s*\(/g);
-  if (refArrayCalls) {
-    issues.push(
-      `RUNTIME: Found ${refArrayCalls.length} call(s) like \`ref.current.forEach(...)\` — refs start as null/undefined, ` +
-      `so the array method will throw on the first frame. Guard every call: ` +
-      `\`if (Array.isArray(ref.current)) ref.current.forEach(...)\` ` +
-      `or initialise the ref with an array: \`useRef([])\`.`,
-    );
-  }
+  // NOTE: ref.current.forEach / .map / .filter without guards is already caught at
+  // runtime by DynamicPhysicsScene's useFrameSafe wrapper (silently stops that frame
+  // callback and logs once). Flagging it here as a hard failure caused destructive
+  // full rewrites that made scene quality much worse. Let useFrameSafe handle it.
 
+  return issues;
+}
+
+/**
+ * Post-sanitize audit: after the server sanitizer runs, any remaining undefined-name
+ * patterns are bugs that slipped through and must trigger a regeneration.
+ */
+function sanitizerAudit(code: string): string[] {
+  const issues: string[] = [];
+  // These should have been replaced by sanitizeCode; if still present, something went wrong.
+  if (/\buseFrameR3F\b/.test(code)) {
+    issues.push("SANDBOX ERROR: useFrameR3F is NOT a valid R3F hook — replace every occurrence with useFrame. This will crash at runtime.");
+  }
+  if (/\buseR3FThree\b/.test(code)) {
+    issues.push("SANDBOX ERROR: useR3FThree is NOT a valid hook — replace with useThree.");
+  }
+  if (/\buseThreeContext\b/.test(code)) {
+    issues.push("SANDBOX ERROR: useThreeContext is NOT a valid hook — replace with useThree.");
+  }
+  if (/\bimport\b.*\bfrom\b/.test(code)) {
+    issues.push("SANDBOX ERROR: import statements are stripped at runtime and will cause ReferenceError. Remove all import/require lines.");
+  }
   return issues;
 }
 
@@ -231,9 +284,17 @@ function staticGeometryAudit(code: string, topic: string): string[] {
     }
   }
 
+  // Objects with repeated elements (strings, spokes, teeth, rungs, grids) legitimately
+  // generate many meshes via loops — a single `.map()` call can render dozens of meshes
+  // but only appears as one `<mesh>` tag in source. Lower the threshold for these topics.
+  const hasRepeatedElements = /racket|racquet|string|fence|grid|lattice|spoke|rung|tooth|tee|truss|ladder/.test(t);
+  // Also detect loop-generated meshes: Array.from / .map returning <mesh>
+  const hasLoopMeshes = /Array\.from|\.map\s*\(.*<mesh|useMemo.*<mesh/.test(code);
   const meshCount = (code.match(/<mesh\b/g) || []).length;
-  if (meshCount < 18) {
-    issues.push(`STRUCTURE: Only ${meshCount} <mesh> elements — too simplistic. Build a recognisable object with many sub-parts (target 25+).`);
+  const effectiveMeshCount = hasLoopMeshes ? Math.max(meshCount * 3, meshCount) : meshCount;
+  const minMeshes = hasRepeatedElements || hasLoopMeshes ? 8 : 18;
+  if (effectiveMeshCount < minMeshes) {
+    issues.push(`STRUCTURE: Only ${meshCount} <mesh> elements — too simplistic. Build a recognisable object with many sub-parts (target ${minMeshes}+).`);
   }
 
   const boxCount = (code.match(/<boxGeometry\b/g) || []).length;
@@ -243,7 +304,11 @@ function staticGeometryAudit(code: string, topic: string): string[] {
   const capsuleCount = (code.match(/<capsuleGeometry\b/g) || []).length;
   const coneCount = (code.match(/<coneGeometry\b/g) || []).length;
   const shapeVariety = [boxCount, sphereCount, cylCount, torusCount, capsuleCount, coneCount].filter((n) => n > 0).length;
-  if (boxCount >= Math.max(1, meshCount - 2) || shapeVariety <= 1) {
+
+  // Don't flag "mostly boxes" for objects where thin boxes are the correct geometry
+  // (racket strings, bridge beams, fences, ladders, grids, buildings with windows, etc.)
+  const boxesAreIntentional = /racket|racquet|string|bridge|fence|lattice|building|ladder|grid|shelf|book|window/.test(t);
+  if (!boxesAreIntentional && (boxCount >= Math.max(1, meshCount - 2) || shapeVariety <= 1)) {
     issues.push("STRUCTURE: Scene is degenerate (mostly a single primitive family, often box-only). Use multiple geometry types and real sub-assemblies.");
   }
 
@@ -374,44 +439,270 @@ const spokeAngles = useMemo(
 // ═══ END SECOND REFERENCE ═══
 `.trim();
 
+/**
+ * Third reference: sports/hand-held equipment with connected parts.
+ * Shows the tennis racket as the canonical non-vehicle 3D example —
+ * oval torus frame, string grid loop, throat, handle, all CONNECTED in Y-axis.
+ * CRITICAL layout rule: everything hangs off a single <group> so parts are
+ * relative to each other, NOT independently positioned at wild y-offsets.
+ */
+const REFERENCE_SPORTS_SNIPPET = `
+// ═══ THIRD REFERENCE: Tennis Racket — connected parts, string grid, oval frame ═══
+//
+// COORDINATE LAYOUT (use this pattern for ANY hand-held / standing object):
+//   y=0.00  — ground / butt of handle
+//   y=0.00–0.38 — grip cylinder
+//   y=0.38–0.62 — throat (two angled thin boxes converging upward)
+//   y=0.62–0.72 — frame yoke (short neck connecting throat to oval)
+//   y=0.72–1.18 — oval head centre at y=0.95  ← this is where the torus sits
+//
+// ALL parts are children of a single <group> — they share the same origin.
+// Never scatter parts across unrelated y-offsets; always build hierarchically.
+
+// ── String grid helper ─────────────────────────────────────────────────────
+const H_STRINGS = 14;  // horizontal
+const V_STRINGS = 10;  // vertical
+const STRING_SPAN = 0.38; // half-length of strings inside oval
+
+// Horizontal strings (run left–right across the head)
+{Array.from({ length: H_STRINGS }, (_, i) => {
+  const y = -STRING_SPAN + (i / (H_STRINGS - 1)) * STRING_SPAN * 2;
+  return (
+    <mesh key={"h" + i} position={[0, 0.95 + y, 0]} castShadow>
+      <boxGeometry args={[0.44, 0.005, 0.005]} />
+      <meshStandardMaterial color="#e5e7eb" roughness={0.4} />
+    </mesh>
+  );
+})}
+
+// Vertical strings (run top–bottom across the head)
+{Array.from({ length: V_STRINGS }, (_, i) => {
+  const x = -0.19 + (i / (V_STRINGS - 1)) * 0.38;
+  return (
+    <mesh key={"v" + i} position={[x, 0.95, 0]} castShadow>
+      <boxGeometry args={[0.005, STRING_SPAN * 2, 0.005]} />
+      <meshStandardMaterial color="#e5e7eb" roughness={0.4} />
+    </mesh>
+  );
+})}
+
+// ── Oval frame ─────────────────────────────────────────────────────────────
+// torusGeometry: [ring-radius, tube-radius, tubularSegments, radialSegments]
+// rotation={[Math.PI/2, 0, 0]} makes the ring face the camera (lie in XY plane)
+<mesh position={[0, 0.95, 0]} rotation={[Math.PI/2, 0, 0]} castShadow>
+  <torusGeometry args={[0.22, 0.013, 10, 60]} />
+  <meshStandardMaterial color="#1e40af" metalness={0.6} roughness={0.2} />
+</mesh>
+
+// ── Throat ─────────────────────────────────────────────────────────────────
+// Two thin boxes angled inward from head down to handle neck
+<mesh position={[-0.09, 0.67, 0]} rotation={[0, 0, 0.38]} castShadow>
+  <boxGeometry args={[0.035, 0.17, 0.015]} />
+  <meshStandardMaterial color="#1e40af" metalness={0.55} roughness={0.25} />
+</mesh>
+<mesh position={[0.09, 0.67, 0]} rotation={[0, 0, -0.38]} castShadow>
+  <boxGeometry args={[0.035, 0.17, 0.015]} />
+  <meshStandardMaterial color="#1e40af" metalness={0.55} roughness={0.25} />
+</mesh>
+
+// ── Handle shaft ───────────────────────────────────────────────────────────
+<mesh position={[0, 0.30, 0]} castShadow>
+  <cylinderGeometry args={[0.016, 0.020, 0.42, 16]} />
+  <meshStandardMaterial color="#1e40af" metalness={0.5} roughness={0.3} />
+</mesh>
+
+// ── Grip (wrapped section — slightly octagonal, different material) ─────────
+<mesh position={[0, 0.22, 0]} castShadow>
+  <cylinderGeometry args={[0.024, 0.024, 0.30, 8]} />
+  <meshStandardMaterial color="#374151" roughness={0.9} metalness={0.0} />
+</mesh>
+
+// ── Butt cap ───────────────────────────────────────────────────────────────
+<mesh position={[0, 0.065, 0]} castShadow>
+  <cylinderGeometry args={[0.030, 0.028, 0.025, 16]} />
+  <meshStandardMaterial color="#111827" roughness={0.7} />
+</mesh>
+// ═══ END THIRD REFERENCE ═══
+`.trim();
+
 // ─────────────────────────────────────────────────────────────────────────────
 // STAGE 1 — VISUAL RESEARCH
+//
+// Priority order:
+//   1. Gemini 2.0 Flash + Google Search grounding (live web search for real specs)
+//   2. Gemini 1.5 Flash (from training data — no web)
+//   3. NVIDIA Nano
+//   4. Groq llama-3.3-70b
+//
+// The structured JSON output feeds directly into Nemotron's code generation prompt.
 // ─────────────────────────────────────────────────────────────────────────────
-async function runVisualResearch(topic: string, params: Record<string, number>): Promise<string> {
-  const res = await groq.chat.completions.create({
-    model: REVIEW_MODEL,
-    temperature: 0.2,
-    max_tokens: 1200,
-    messages: [{
-      role: "user",
-      content: `You are a 3D artist who just studied many reference images and engineering diagrams of "${topic}".
-Describe it in exhaustive detail so another artist could build it without ever seeing it.
 
-Output ONLY a JSON object:
+/** Build the structured research brief prompt for any Gemini/LLM call. */
+function buildResearchPrompt(topic: string, params: Record<string, number>): string {
+  return `You are a world-class technical illustrator and 3D modeller.
+Research "${topic}" thoroughly — look up reference images, engineering diagrams, real product specifications, and existing 3D model breakdowns.
+
+Produce an EXHAUSTIVE structural brief that a Three.js developer will use to build a pixel-accurate 3D model.
+Every measurement should be grounded in real-world proportions you found.
+
+Output ONLY a valid JSON object (no markdown, no explanation) with ALL of the following fields:
+
 {
-  "overallShape": "<one sentence describing the silhouette>",
-  "proportions": { "width": <relative>, "height": <relative>, "depth": <relative> },
+  "overallShape": "<one-sentence silhouette description based on real references>",
+  "realWorldDimensions": "<actual size, e.g. 'standard tennis racket: 68.5 cm long, 29 cm wide head'>",
+  "boundingBox": { "widthRatio": <number>, "heightRatio": 1.0, "depthRatio": <number> },
+  "coordinateOrigin": "<where [0,0,0] should be placed — e.g. 'butt of handle at y=0, object stands up along Y-axis'>",
+
   "parts": [
-    { "name": "<part name>", "shape": "<cylinder/box/cone/torus/sphere/capsule>", "relativeSize": "<small/medium/large>", "position": "<where on the object>", "material": "<metal/glass/rubber/plastic/etc>" }
+    {
+      "name": "<exact part name from real engineering diagrams>",
+      "count": <integer — how many of this part exist>,
+      "shape": "<box|cylinder|sphere|torus|cone|capsule|lathe|loop-of-boxes>",
+      "realDimensions": "<actual size in cm or mm from specs>",
+      "relativePosition": "<position relative to origin in Three.js units where total height=1.0, e.g. '[0, 0.85, 0]'>",
+      "rotation": "<Three.js rotation array, e.g. '[Math.PI/2, 0, 0]' or 'none'>",
+      "material": "<metal|rubber|nylon|graphite|foam|leather|etc>",
+      "color": "<realistic hex color>",
+      "parent": "<parent part name or 'root'>"
+    }
   ],
-  "distinctiveFeatures": ["<feature 1>", "<feature 2>", ...],
+
+  "viewDescriptions": {
+    "front": "<what you see from the front — from real photos/references>",
+    "side":  "<side profile from references>",
+    "top":   "<top-down view from references>"
+  },
+
+  "distinctiveFeatures": ["<at least 6 features that make this unmistakably recognizable>"],
+  "commonMistakes": ["<at least 4 things naive 3D modellers get wrong about this object>"],
+
+  "geometryRules": [
+    "<at least 10 concrete Three.js geometry rules, e.g. 'Frame: torusGeometry [0.22, 0.013, 10, 60] at y=0.85, rotated [PI/2,0,0]'>",
+    "<strings rule>",
+    "<handle rule>",
+    "..."
+  ],
+
   "params": ${JSON.stringify(Object.keys(params))},
-  "howParamsAffectVisuals": { "<param>": "<what changes visually>" }
+  "howParamsAffectVisuals": { "<param>": "<what changes visually>" },
+  "animationNotes": "<what moves in real life and how to animate it in useFrame>"
 }
 
-Be exhaustive — list every structural component that makes this object recognisable. Minimum 10 parts.
+REQUIREMENTS:
+- parts[] must have at LEAST 20 entries for a complex object
+- All positions must form a CONNECTED hierarchy — no floating disconnected parts
+- Largest dimension = 1.0 in relative units — everything else is a fraction of that`;
+}
 
-ALSO include a field "geometryRules" (array of strings) with Three.js-specific rules you will follow, e.g.:
-- "Wheels: torus/cylinder with rotation [Math.PI/2,0,0], positioned on ground at y=wheelRadius"
-- "Gears: N tooth boxes in a loop with cos/sin at pitch radius"
-`,
-    }],
+async function runVisualResearch(topic: string, params: Record<string, number>): Promise<string> {
+  const geminiKey = process.env.GOOGLE_API_KEY;
+
+  // ── 1. Gemini 2.0 Flash + Google Search (live web research) ──────────────
+  // Gemini 2.0 Flash can search the web mid-request, giving it access to real
+  // product specs, engineering diagrams, and 3D model references for any topic.
+  if (geminiKey) {
+    try {
+      const searchPrompt = `Search the web for: "${topic} dimensions specifications engineering diagram 3D model parts breakdown measurements"
+
+Use what you find to fill out this exact structural brief for a Three.js developer.
+
+${buildResearchPrompt(topic, params)}`;
+
+      const gRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tools: [{ google_search: {} }],
+            contents: [{ parts: [{ text: searchPrompt }] }],
+            generationConfig: { temperature: 0.1, maxOutputTokens: 4096 },
+          }),
+        },
+      );
+      const gData = await gRes.json();
+      // Gemini 2.0 with grounding concatenates all text parts
+      const parts = gData?.candidates?.[0]?.content?.parts || [];
+      const gTxt = parts.map((p: { text?: string }) => p.text || "").join("");
+      const gm = gTxt.match(/\{[\s\S]*\}/);
+      if (gm && gm[0].length > 600) {
+        console.log(`[generate-scene] Research via Gemini 2.0 Flash + Google Search: ${gm[0].length} chars`);
+        return gm[0];
+      }
+      console.warn("[generate-scene] Gemini 2.0 Flash search returned short result, falling back");
+    } catch (e) {
+      console.warn("[generate-scene] Gemini 2.0 Flash search error:", e);
+    }
+  }
+
+  // ── 2. Gemini 1.5 Flash (training data only — no live search) ────────────
+  if (geminiKey) {
+    try {
+      const gRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: buildResearchPrompt(topic, params) }] }],
+            generationConfig: { temperature: 0.1, maxOutputTokens: 4096 },
+          }),
+        },
+      );
+      const gData = await gRes.json();
+      const gTxt = gData?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      const gm = gTxt.match(/\{[\s\S]*\}/);
+      if (gm && gm[0].length > 500) {
+        console.log(`[generate-scene] Research via Gemini 1.5 Flash: ${gm[0].length} chars`);
+        return gm[0];
+      }
+    } catch (e) {
+      console.warn("[generate-scene] Gemini 1.5 Flash research error:", e);
+    }
+  }
+
+  // ── 3. NVIDIA Nano fallback ───────────────────────────────────────────────
+  if (process.env.NVIDIA_API_KEY) {
+    try {
+      const nRes = await fetch(`${NVIDIA_BASE}/chat/completions`, {
+        method: "POST",
+        signal: AbortSignal.timeout(30_000),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: "nvidia/llama-3.1-nemotron-nano-8b-v1",
+          messages: [{ role: "user", content: buildResearchPrompt(topic, params) }],
+          temperature: 0.1,
+          max_tokens: 3000,
+        }),
+      });
+      const nData = await nRes.json();
+      const nTxt = nData?.choices?.[0]?.message?.content || "";
+      const nm = nTxt.match(/\{[\s\S]*\}/);
+      if (nm && nm[0].length > 400) {
+        console.log(`[generate-scene] Research via NVIDIA Nano: ${nm[0].length} chars`);
+        return nm[0];
+      }
+    } catch (e) {
+      console.warn("[generate-scene] NVIDIA Nano research error:", e);
+    }
+  }
+
+  // ── 4. Groq fallback (last resort) ───────────────────────────────────────
+  const res = await groq.chat.completions.create({
+    model: REVIEW_MODEL,
+    temperature: 0.15,
+    max_tokens: 3000,
+    messages: [{ role: "user", content: buildResearchPrompt(topic, params) }],
   });
 
   const txt = res.choices?.[0]?.message?.content || "";
-  // Return the JSON section if present, otherwise the full text
   const m = txt.match(/\{[\s\S]*\}/);
-  return m ? m[0] : txt;
+  const result = m ? m[0] : txt;
+  console.log(`[generate-scene] Research via Groq fallback: ${result.length} chars`);
+  return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -452,9 +743,13 @@ ${REFERENCE}
 
 ${REFERENCE_BICYCLE_SNIPPET}
 
+${REFERENCE_SPORTS_SNIPPET}
+
 EXPECTATIONS:
 - The reference F1 car has 40+ distinct mesh elements
-- You must write at least that many for "${topic}"
+- The reference tennis racket shows the CORRECT connected-parts pattern (all parts relative to one root <group>)
+- You must write at least that many parts for "${topic}"
+- CRITICAL: ALL parts MUST be children of a single root <group> — never scatter parts at random y-offsets
 - Every param must drive at least ONE visual change
 - Every moving part in real life must animate in useFrame
 - Stress colours and point lights for warning/critical states
@@ -485,30 +780,66 @@ ${paramLines}
 SIM TYPE: ${simType}
 PHYSICS CONTEXT: ${physicsContext || "Physics simulation."}
 
-══════ REQUIREMENTS ══════
-1. Function: export default function GeneratedScene({ params = {}, simConfig = {} }) {
-2. JSX is fine — auto-transformed on server.
-3. Imports only from "react", "@react-three/fiber", "three".
-4. Defensive param reading: const x = Number(params.X ?? params.x ?? DEFAULT);
-5. Pull constraint thresholds from simConfig?.constraints?.find(c => c.param === "X") || {}
-6. useFrame for ALL animation. No setInterval/setTimeout.
-7. castShadow / receiveShadow on all major meshes.
-8. Dark ground disc: <circleGeometry args={[6,64]} /> at y=0.
-9. Stress colours: if (val>=critT) "#ef4444" else if (val>=warnT) "#fcd34d" else normal.
-10. pointLight effects at warning/critical states.
-11. MINIMUM 200 lines. More is always better. Be exhaustive.
-12. Think carefully about 3D positions — objects must sit correctly in 3D space.
-13. Reproduce EVERY structural part from the visual research above.
-14. Keep the main model centered near origin and on/above ground (avoid huge offsets that hide the object from camera).
-15. Use high-contrast materials. Avoid all-dark scenes; include at least one readable light-toned material for silhouette clarity.
-16. useMemo / useCallback: second argument MUST be an array ([] or [a,b]). Never undefined or null.
-17. Refs used as arrays: initialise with useRef([]) OR guard every .current.forEach/.map/.filter with Array.isArray(ref.current) check.
-18. Output ONLY the component code. Zero markdown. Zero explanation.`;
+══════ TWO-PHASE APPROACH — MANDATORY ══════
 
-  // Try Nemotron Ultra (streaming) first
+PHASE 1 — SCENE BLUEPRINT (write this as a JSX comment block first):
+Before writing any executable code, open with a detailed comment:
+/*
+  SCENE BLUEPRINT: ${topic}
+  ─────────────────────────────
+  Bounding box: [width] × [height] × [depth] units
+  Coordinate origin: [describe where 0,0,0 sits, e.g. "ground centre, object base"]
+
+  GROUP HIERARCHY:
+    root
+    ├─ <groupName>  position=[x,y,z]  — <what it contains>
+    │   ├─ <part>   shape=cylinder    dims=[r,h]  pos=[x,y,z]  mat=<material>
+    │   └─ <part>   shape=box         dims=[w,h,d] pos=[x,y,z] mat=<material>
+    └─ ...
+
+  MATERIALS:
+    primary:   color=#____  roughness=0.x  metalness=0.x
+    secondary: color=#____  roughness=0.x  metalness=0.x
+    accent:    color=#____  ...
+
+  ANIMATIONS:
+    - <partName>: rotate on Y at speed proportional to <param>
+    - <partName>: oscillate on Z ±amp driven by <param>
+
+  WHY THIS LOOKS LIKE A ${topic.toUpperCase()} AND NOT SOMETHING ELSE:
+    - <key visual feature 1>
+    - <key visual feature 2>
+    - <key visual feature 3>
+*/
+
+PHASE 2 — FULL JSX CODE:
+After the blueprint comment, write the complete GeneratedScene component.
+
+══════ CODE REQUIREMENTS ══════
+1. Function signature: function GeneratedScene({ params = {}, simConfig = {} }) {  (no export/import)
+2. JSX is fine — auto-transformed on server via sucrase.
+3. NO import statements — all globals are pre-injected (React, useFrame, useThree, THREE, Html, Line, Text, useRef, useState, useEffect, useMemo).
+4. NEVER write useFrameR3F — it does not exist. Use useFrame.
+5. Defensive param reading: const x = Number(params.X ?? params.x ?? DEFAULT);
+6. Pull constraint thresholds from simConfig?.constraints?.find(c => c.param === "X") || {}
+7. useFrame for ALL animation. No setInterval/setTimeout.
+8. castShadow / receiveShadow on all major meshes.
+9. Dark ground disc: <circleGeometry args={[6,64]} /> at y=0.
+10. Stress colours: if (val>=critT) "#ef4444" else if (val>=warnT) "#fcd34d" else normal.
+11. pointLight effects at warning/critical states.
+12. MINIMUM 300 lines of code. Aim for 400+. More is always better — be relentlessly exhaustive.
+13. Think carefully about 3D positions — follow your blueprint exactly.
+14. Reproduce EVERY structural part listed in the visual research AND your blueprint.
+15. Keep the main model centered near origin and on/above ground (avoid huge offsets that hide the object from camera).
+16. Use high-contrast materials. Avoid all-dark scenes; include at least one readable light-toned material for silhouette clarity.
+17. useMemo / useCallback: second argument MUST be an array ([] or [a,b]). Never undefined or null.
+18. Refs used as arrays: initialise with useRef([]) OR guard every .current.forEach/.map/.filter with Array.isArray(ref.current) check.
+19. Output ONLY the blueprint comment + component code. Zero markdown fences. Zero prose explanation.`;
+
+  // Try Nemotron Ultra (streaming) first — 16k tokens so it can write a full blueprint + code
   if (process.env.NVIDIA_API_KEY) {
     try {
-      const content = await streamNvidia(systemMsg, userMsg, 12000);
+      const content = await streamNvidia(systemMsg, userMsg, 16000);
       if (content.length > 500) return content;
       console.warn(`[generate-scene] Nemotron Ultra attempt ${attempt}: only ${content.length} chars, retrying with Groq`);
     } catch (e) {
@@ -532,7 +863,7 @@ async function runCodeReview(
 ): Promise<{ pass: boolean; issues: string[] }> {
 
   const paramKeys = Object.keys(params).join(", ");
-  const researchSnippet = visualResearch.slice(0, 1200); // keep prompt lean
+  const researchSnippet = visualResearch.slice(0, 4000); // full research context for accurate review
   const staticBlock = staticIssues.length
     ? `\nAUTOMATED SPATIAL AUDIT (fail if any remain unfixed):\n${staticIssues.map((s, i) => `${i + 1}. ${s}`).join("\n")}\n`
     : "";
@@ -591,8 +922,11 @@ ${code.slice(0, 12000)}
 // STREAMING HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 async function streamNvidia(system: string, user: string, maxTokens: number): Promise<string> {
+  // Large token budgets (16k) can take 2+ minutes — use a generous timeout
+  const timeoutMs = maxTokens > 8000 ? 150_000 : 90_000;
   const res = await fetch(`${NVIDIA_BASE}/chat/completions`, {
     method: "POST",
+    signal: AbortSignal.timeout(timeoutMs),
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`,
@@ -615,6 +949,7 @@ async function streamNvidia(system: string, user: string, maxTokens: number): Pr
 async function streamGroq(system: string, user: string, maxTokens: number): Promise<string> {
   const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
+    signal: AbortSignal.timeout(90_000),
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
@@ -720,7 +1055,7 @@ export async function POST(req: Request) {
 
             // ── Tool 2: audit ────────────────────────────────────────────────
             send({ event: "step", tool: "audit", status: "running", turn, label: "Auditing geometry & hooks…" });
-            const auditIssues = [...staticGeometryAudit(code, topic), ...staticRuntimeAudit(code)];
+            const auditIssues = [...staticGeometryAudit(code, topic), ...staticRuntimeAudit(code), ...sanitizerAudit(code)];
             if (auditIssues.length) {
               send({ event: "step", tool: "audit", status: "fail", turn, issues: auditIssues, label: `${auditIssues.length} issue(s) found` });
               allIssues.push(...auditIssues);
@@ -759,24 +1094,30 @@ export async function POST(req: Request) {
                     break;
                   } else {
                     send({ event: "step", tool: "review", status: "warn", turn, issues: review.issues, label: `${review.issues.length} quality issue(s)` });
-                    allIssues.push(...review.issues);
+                    // Only block on hard failures (structural/spatial issues from static audit +
+                    // reviewer hard-fails). Pure reviewer suggestions don't block on the last rewrite turn.
+                    if (!review.pass || auditIssues.length > 0) {
+                      allIssues.push(...review.issues);
+                    }
                   }
                 } else {
-                  // Last turn — only accept if there are no outstanding quality issues.
+                  // Last turn — compile passed so always accept. Downgrade any remaining
+                  // quality issues to warnings so the user always gets a result.
                   if (allIssues.length === 0) {
                     send({ event: "step", tool: "review", status: "pass", turn, label: "Accepted ✓" });
-                    finalCode        = code;
-                    finalTransformed = transformed!;
-                    break;
+                  } else {
+                    send({
+                      event: "step",
+                      tool: "review",
+                      status: "warn",
+                      turn,
+                      issues: allIssues,
+                      label: `Accepted with ${allIssues.length} minor note(s)`,
+                    });
                   }
-                  send({
-                    event: "step",
-                    tool: "review",
-                    status: "fail",
-                    turn,
-                    issues: allIssues,
-                    label: "Rejected: quality checks not satisfied",
-                  });
+                  finalCode        = code;
+                  finalTransformed = transformed!;
+                  break;
                 }
               }
             }
