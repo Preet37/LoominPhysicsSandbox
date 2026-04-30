@@ -26,9 +26,9 @@ function check(name, condition, detail = "") {
   condition ? ok(name) : fail(name, detail);
 }
 
-async function post(path, body) {
+async function post(path, body, timeoutMs = TIMEOUT) {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), TIMEOUT);
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(`${BASE}${path}`, {
       method: "POST",
@@ -209,13 +209,13 @@ check("answer: mentions Tsiolkovsky or delta-v",
       "expected physics content");
 
 // 7d. compile-wiki
-console.log("\n  [compile-wiki — ~10s]");
+console.log("\n  [compile-wiki — ~30s]");
 const cw = await post("/api/compile-wiki", {
   journals: [
     { topic: "spring_mass", name: "Spring-Mass System", editorValue: "Spring: F=-kx Hooke's law. Frequency omega=sqrt(k/m). Energy E=0.5kx^2+0.5mv^2." },
     { topic: "pendulum",   name: "Pendulum",            editorValue: "Pendulum period T=2pi*sqrt(L/g). SHM for small angles. Damping via air resistance." },
   ],
-});
+}, 120_000); // wiki needs up to 90s (NVIDIA) + fallback
 check("wiki: valid JSON",         !cw._error && !cw._raw, cw._error);
 check("wiki: has article",        typeof cw.article === "object" && cw.article !== null);
 check("wiki: article has title",  typeof cw.article?.title === "string" && cw.article.title.length > 0,

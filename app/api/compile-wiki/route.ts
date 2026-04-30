@@ -27,7 +27,7 @@ async function callLLM(system: string, user: string, maxTokens = 3000): Promise<
     try {
       const res = await fetch(`${NVIDIA_BASE}/chat/completions`, {
         method: "POST",
-        signal: AbortSignal.timeout(90_000),
+        signal: AbortSignal.timeout(35_000),
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.NVIDIA_API_KEY}` },
         body: JSON.stringify({ model: NVIDIA_THINKING, messages, temperature: 0.4, max_tokens: maxTokens }),
       });
