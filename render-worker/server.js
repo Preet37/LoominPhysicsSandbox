@@ -3,6 +3,9 @@ import fs from "fs";
 import { spawn } from "child_process";
 import os from "os";
 import path from "path";
+import { resolveCadBinaries } from "./binPaths.js";
+
+const CAD = resolveCadBinaries();
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
@@ -34,6 +37,42 @@ function runCmd(cmd, args, opts = {}) {
 
 const MIN_GLB_B64 = 80; // non-empty glTF binary is at least dozens of bytes when base64
 
+/**
+ * Renders share one CPU and previously shared one set of /tmp output paths, so two
+ * concurrent requests would delete each other's intermediate files mid-pipeline
+ * ("STL Import: Cannot open file '/tmp/output.stl'"). Each job now gets its own
+ * directory, and the queue keeps Blender/OpenSCAD from thrashing the machine.
+ */
+let renderQueue = Promise.resolve();
+
+function enqueue(job) {
+  const run = renderQueue.then(job, job);
+  renderQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+function cleanup(dir) {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* best effort */
+  }
+}
+
+/**
+ * LLM-authored Blender scripts hardcode the legacy /tmp/output.glb paths, so
+ * redirect them into this job's private directory.
+ */
+function redirectHardcodedPaths(source, { outGlb, outPng, outStl }) {
+  return String(source)
+    .replaceAll("/tmp/output.glb", outGlb)
+    .replaceAll("/tmp/thumbnail.png", outPng)
+    .replaceAll("/tmp/output.stl", outStl);
+}
+
 async function renderWithBlenderScript({ scriptSource, screenshot }) {
   if (!scriptSource || !String(scriptSource).trim()) {
     return {
@@ -46,21 +85,17 @@ async function renderWithBlenderScript({ scriptSource, screenshot }) {
   }
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "loomin-blender-"));
-  const pyPath = path.join(tmpDir, "script.py");
-  writeFile(pyPath, scriptSource);
+  const outGlb = path.join(tmpDir, "output.glb");
+  const outPng = path.join(tmpDir, "thumbnail.png");
+  const outStl = path.join(tmpDir, "output.stl");
 
-  const outGlb = "/tmp/output.glb";
-  const outPng = "/tmp/thumbnail.png";
-  // Clean old outputs if any
-  try {
-    fs.rmSync(outGlb, { force: true });
-    fs.rmSync(outPng, { force: true });
-  } catch {}
+  const pyPath = path.join(tmpDir, "script.py");
+  writeFile(pyPath, redirectHardcodedPaths(scriptSource, { outGlb, outPng, outStl }));
 
   let blend = { stdout: "", stderr: "" };
   let blendError = null;
   try {
-    blend = await runCmd("blender", ["--background", "--python", pyPath]);
+    blend = await runCmd(CAD.blender, ["--background", "--python", pyPath]);
   } catch (e) {
     // Exit code non-zero is common when Cycles denoiser/GPU init fails in headless Docker,
     // even though the GLB export may have already been written successfully.
@@ -76,8 +111,9 @@ async function renderWithBlenderScript({ scriptSource, screenshot }) {
 
   if (!glbBase64 || glbBase64.length < MIN_GLB_B64) {
     const hint = blendError
-      ? `Blender exited with error and /tmp/output.glb is missing or empty: ${blendError.slice(0, 400)}`
-      : "Blender finished but /tmp/output.glb is missing or too small. Script must call bpy.ops.export_scene.gltf(filepath='/tmp/output.glb', export_format='GLB').";
+      ? `Blender exited with error and the GLB is missing or empty: ${blendError.slice(0, 400)}`
+      : "Blender finished but no GLB was written. Script must call bpy.ops.export_scene.gltf(filepath='/tmp/output.glb', export_format='GLB').";
+    cleanup(tmpDir);
     return {
       ok: false,
       glbBase64: "",
@@ -88,6 +124,7 @@ async function renderWithBlenderScript({ scriptSource, screenshot }) {
   }
 
   // GLB exists — success regardless of Blender's exit code
+  cleanup(tmpDir);
   return { ok: true, glbBase64, thumbnailBase64, error: null, stderr: blend.stderr || "" };
 }
 
@@ -106,28 +143,34 @@ async function exportFromOpenScadToGLB({ scadSource, screenshot }) {
   const scadPath = path.join(tmpDir, "model.scad");
   writeFile(scadPath, scadSource);
 
-  const outStl = "/tmp/output.stl";
-  const outGlb = "/tmp/output.glb";
-  const outPng = "/tmp/thumbnail.png";
-
-  try {
-    fs.rmSync(outStl, { force: true });
-    fs.rmSync(outGlb, { force: true });
-    fs.rmSync(outPng, { force: true });
-  } catch {}
+  const outStl = path.join(tmpDir, "output.stl");
+  const outGlb = path.join(tmpDir, "output.glb");
+  const outPng = path.join(tmpDir, "thumbnail.png");
 
   // 1) Compile scad → STL
   // binstl tends to be smaller/faster than ascii; it's still importable by Blender.
   let scadStderr = "";
   try {
-    const o = await runCmd("openscad", ["-o", outStl, "--export-format", "binstl", scadPath]);
+    const o = await runCmd(CAD.openscad, ["-o", outStl, "--export-format", "binstl", scadPath]);
     scadStderr = o.stderr || "";
   } catch (e) {
+    cleanup(tmpDir);
     return {
       glbBase64: "",
       thumbnailBase64: "",
       ok: false,
       error: e?.message || String(e),
+      stderr: scadStderr,
+    };
+  }
+
+  if (!fs.existsSync(outStl) || fs.statSync(outStl).size === 0) {
+    cleanup(tmpDir);
+    return {
+      glbBase64: "",
+      thumbnailBase64: "",
+      ok: false,
+      error: "OpenSCAD produced no STL — the script likely renders nothing (empty or 2D-only geometry).",
       stderr: scadStderr,
     };
   }
@@ -167,9 +210,14 @@ bpy.context.active_object.data.energy = 2.5
 bpy.ops.object.light_add(type="SUN", location=(-4, 4, 6))
 bpy.context.active_object.data.energy = 1.5
 
-# Import STL
-bpy.ops.import_mesh.stl(filepath=out_stl)
-imported = bpy.context.selected_objects
+# Import STL (Blender 4.x+ uses wm.stl_import; 3.x used import_mesh.stl)
+try:
+    bpy.ops.wm.stl_import(filepath=out_stl)
+except AttributeError:
+    bpy.ops.import_mesh.stl(filepath=out_stl)
+imported = list(bpy.context.selected_objects)
+if not imported:
+    imported = [o for o in bpy.data.objects if o.type == "MESH"]
 
 def do_export():
     try:
@@ -244,7 +292,7 @@ else:
   let blend = { stdout: "", stderr: "" };
   let blendErr = null;
   try {
-    blend = await runCmd("blender", ["--background", "--python", pyPath]);
+    blend = await runCmd(CAD.blender, ["--background", "--python", pyPath]);
   } catch (e) {
     // GLB may still have been written before Blender hit the denoiser crash — check below.
     blendErr = e?.message || String(e);
@@ -257,6 +305,7 @@ else:
     fs.existsSync(outPng) && fs.statSync(outPng).size > 0 ? base64File(outPng) : "";
 
   if (!glbBase64 || glbBase64.length < MIN_GLB_B64) {
+    cleanup(tmpDir);
     return {
       ok: false,
       glbBase64: "",
@@ -268,6 +317,7 @@ else:
     };
   }
 
+  cleanup(tmpDir);
   return { ok: true, glbBase64, thumbnailBase64, error: null, stderr: blend.stderr || "" };
 }
 
@@ -280,10 +330,12 @@ app.post("/render", async (req, res) => {
     }
 
     if (generator === "blender") {
-      const out = await renderWithBlenderScript({
-        scriptSource: script || "",
-        screenshot,
-      });
+      const out = await enqueue(() =>
+        renderWithBlenderScript({
+          scriptSource: script || "",
+          screenshot,
+        }),
+      );
       if (!out.ok) {
         console.error("[render-worker] blender failed:", out.error, out.stderr?.slice?.(-500));
         return res.status(500).json({
@@ -296,10 +348,12 @@ app.post("/render", async (req, res) => {
     }
 
     if (generator === "openscad") {
-      const out = await exportFromOpenScadToGLB({
-        scadSource: script || scadSource || "",
-        screenshot,
-      });
+      const out = await enqueue(() =>
+        exportFromOpenScadToGLB({
+          scadSource: script || scadSource || "",
+          screenshot,
+        }),
+      );
       if (!out.ok) {
         console.error("[render-worker] openscad failed:", out.error, out.stderr?.slice?.(-500));
         return res.status(500).json({
@@ -316,6 +370,18 @@ app.post("/render", async (req, res) => {
     console.error("[render-worker] error:", e);
     return res.status(500).json({ success: false, error: e?.message || "render failed" });
   }
+});
+
+app.get("/health", (_req, res) => {
+  const cad = resolveCadBinaries();
+  res.json({
+    status: "ok",
+    ok: true,
+    blender: cad.blenderOk,
+    openscad: cad.openscadOk,
+    blenderPath: cad.blender,
+    openscadPath: cad.openscad,
+  });
 });
 
 app.listen(PORT, () => {

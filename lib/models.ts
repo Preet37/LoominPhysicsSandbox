@@ -1,0 +1,57 @@
+/**
+ * Single source of truth for NVIDIA NIM model identifiers.
+ *
+ * These names were previously copy-pasted across half a dozen routes, and when
+ * `meta/llama-3.1-405b-instruct` stopped being served every one of those routes
+ * broke in the quietest possible way: the request burned its full timeout, threw,
+ * and silently demoted to a weaker Groq fallback. Output got worse with no error
+ * anywhere. Centralising them means a dead model is one edit, and the test suite
+ * can live-probe every identifier the app actually uses.
+ */
+
+export const NVIDIA_BASE = "https://integrate.api.nvidia.com/v1";
+
+/**
+ * Heavy generation cascade, strongest first. Callers should race these rather
+ * than trying them serially — a stalled leader otherwise wastes its whole
+ * timeout before the next candidate starts.
+ */
+export const NVIDIA_CODE_CHAIN = [
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  "nvidia/nemotron-3-super-120b-a12b",
+] as const;
+
+/** Best available model for long-form reasoning (wiki articles, notes, design). */
+export const NVIDIA_THINKING = NVIDIA_CODE_CHAIN[0];
+
+/** Small, cheap, quick — classification, short answers, extraction. */
+export const NVIDIA_FAST = "nvidia/llama-3.1-nemotron-nano-8b-v1";
+
+/**
+ * Known-dead identifiers, kept so config drift fails loudly instead of silently.
+ * - meta/llama-3.1-405b-instruct: 404, never served on this endpoint.
+ * - nvidia/llama-3.1-nemotron-ultra-253b-v1: appears in /v1/models but its
+ *   backing function is undeployed, so real calls 404. Presence in the model
+ *   listing is therefore not sufficient evidence that a model works.
+ */
+export const RETIRED_NVIDIA_MODELS: readonly string[] = [
+  "meta/llama-3.1-405b-instruct",
+  "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+];
+
+/**
+ * Nemotron reasoning traces are billed against max_tokens but arrive on
+ * `reasoning_content`, which every SSE collector here discards — so leaving
+ * thinking enabled truncates real output while making requests ~8x slower.
+ */
+export const NVIDIA_NO_THINKING = { thinking: false } as const;
+
+export function assertLiveModels(scope: string, models: readonly string[]): void {
+  const dead = models.filter((m) => RETIRED_NVIDIA_MODELS.includes(m));
+  if (dead.length > 0) {
+    console.error(
+      `[${scope}] FATAL CONFIG: retired NVIDIA model(s) in use: ${dead.join(", ")}. ` +
+      `These 404 and will silently demote this route to its weaker fallback.`,
+    );
+  }
+}

@@ -11,9 +11,15 @@
  */
 
 import { NextResponse } from "next/server";
+import {
+  NVIDIA_BASE,
+  NVIDIA_THINKING,
+  NVIDIA_NO_THINKING,
+  assertLiveModels,
+} from "@/lib/models";
 
-const NVIDIA_BASE = "https://integrate.api.nvidia.com/v1";
-const NVIDIA_THINKING = "meta/llama-3.1-405b-instruct";
+assertLiveModels("compile-wiki", [NVIDIA_THINKING]);
+
 const GROQ_BASE = "https://api.groq.com/openai/v1";
 const GROQ_MODEL = "llama-3.3-70b-versatile";
 
@@ -27,16 +33,25 @@ async function callLLM(system: string, user: string, maxTokens = 3000): Promise<
     try {
       const res = await fetch(`${NVIDIA_BASE}/chat/completions`, {
         method: "POST",
-        signal: AbortSignal.timeout(35_000),
+        signal: AbortSignal.timeout(45_000),
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.NVIDIA_API_KEY}` },
-        body: JSON.stringify({ model: NVIDIA_THINKING, messages, temperature: 0.4, max_tokens: maxTokens }),
+        body: JSON.stringify({
+          model: NVIDIA_THINKING, messages, temperature: 0.4, max_tokens: maxTokens,
+          chat_template_kwargs: NVIDIA_NO_THINKING,
+        }),
       });
       if (res.ok) {
         const data = await res.json();
         const content = data.choices?.[0]?.message?.content;
         if (content) return content;
+      } else {
+        // Silently swallowing this is how a dead model went unnoticed while every
+        // article quietly came from the weaker fallback instead.
+        console.warn(`[compile-wiki] NVIDIA ${NVIDIA_THINKING} ${res.status}, falling back to Groq`);
       }
-    } catch { /* timeout — fall through to Groq */ }
+    } catch (e) {
+      console.warn(`[compile-wiki] NVIDIA ${NVIDIA_THINKING} failed, falling back to Groq:`, String(e).slice(0, 120));
+    }
   }
 
   if (process.env.GROQ_API_KEY) {

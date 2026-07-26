@@ -39,6 +39,9 @@ function normalizeJournal(j) {
     sources: Array.isArray(j?.sources) ? j.sources : [],
     // Compiled wiki article for this journal's topic
     wikiArticle: j?.wikiArticle || null,
+    // Validated dimensional spec sheet the 3D model was built from, so the UI can
+    // show which real product grounded it: { spec, validation }
+    specSheet: j?.specSheet || null,
     // Whether artifacts (python, equations) are currently being generated
     artifactsGenerating: false,
   };
@@ -170,6 +173,13 @@ export const useLoominStore = create((set, get) => ({
   setSceneCode: (code) => {
     const { activeId } = get();
     set((s) => ({ journals: s.journals.map((j) => j.id === activeId ? { ...j, sceneCode: code } : j) }));
+    saveToLS(get());
+  },
+
+  setSpecSheet: (spec, validation) => {
+    const { activeId } = get();
+    const payload = spec ? { spec, validation: validation || null } : null;
+    set((s) => ({ journals: s.journals.map((j) => j.id === activeId ? { ...j, specSheet: payload } : j) }));
     saveToLS(get());
   },
 

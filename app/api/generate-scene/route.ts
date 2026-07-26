@@ -25,11 +25,39 @@
 import Groq from "groq-sdk";
 // @ts-ignore
 import { transform as sucraseTransform } from "sucrase";
+import {
+  researchSpecSheet,
+  formatSpecForPrompt,
+  geminiGenerate,
+  type SpecSheet,
+  type SpecValidation,
+} from "@/lib/specSheet";
+import { smoothnessAudit, polishGeometry } from "@/lib/geometryAudit";
+import { tryRenderGeneratedScene } from "@/lib/sceneSandbox";
+import { raceWithPreference } from "@/lib/modelRace";
+import {
+  NVIDIA_BASE,
+  NVIDIA_CODE_CHAIN,
+  NVIDIA_FAST,
+  NVIDIA_NO_THINKING,
+  assertLiveModels,
+} from "@/lib/models";
 
-const NVIDIA_BASE    = "https://integrate.api.nvidia.com/v1";
-const NVIDIA_MODEL   = "meta/llama-3.1-405b-instruct";
+const NVIDIA_RESEARCH_MODEL = NVIDIA_FAST;
+assertLiveModels("generate-scene", [...NVIDIA_CODE_CHAIN, NVIDIA_RESEARCH_MODEL]);
+
 const REVIEW_MODEL   = "llama-3.3-70b-versatile";
 const MAX_AGENT_TURNS = 4;
+
+/**
+ * Wall-clock ceiling for one scene request. Turn count alone is a poor limiter:
+ * cutting turns throws away repair attempts that genuinely improve quality, while
+ * a slow model can still blow the budget inside the allowed turns. Bounding the
+ * clock instead keeps all four turns available whenever they fit.
+ */
+const SCENE_BUDGET_MS = 270_000;
+/** A turn needs roughly this long (generate + audit + review) to be worth starting. */
+const TURN_COST_ESTIMATE_MS = 55_000;
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY || "missing_groq_key" });
 
@@ -66,10 +94,14 @@ function sanitizeCode(raw: string): string {
 }
 
 /** Tool 1: strip — clean fences, imports, assert GeneratedScene present. */
-function toolStrip(rawCode: string): { code: string; issues: string[] } {
+function toolStrip(rawCode: string): { code: string; issues: string[]; polishFixes: string[] } {
   const stripped = stripImportsExports(stripFences(rawCode));
   // Auto-fix known LLM alias mistakes before auditing
-  const code = sanitizeCode(stripped);
+  const sanitized = sanitizeCode(stripped);
+  // Then fix the mechanical causes of faceted output (low segment counts,
+  // flatShading) rather than spending an agent turn asking the model to do
+  // arithmetic it frequently never gets around to.
+  const { code, fixes: polishFixes } = polishGeometry(sanitized);
   const issues: string[] = [];
   if (!code.includes("GeneratedScene")) {
     issues.push(
@@ -81,7 +113,7 @@ function toolStrip(rawCode: string): { code: string; issues: string[] } {
       `Output only ${code.length} chars — write the complete component (minimum ~200 lines / 6000 chars).`,
     );
   }
-  return { code, issues };
+  return { code, issues, polishFixes };
 }
 
 /** Tool 3: transform — sucrase JSX→JS, surface real parse error. */
@@ -105,11 +137,9 @@ function toolTransform(code: string): { transformed: string | null; issues: stri
   }
 }
 
-/** Tool 4: compile — new Function() parse in Node. Catches JS errors before client eval. */
+/** Tool 4: compile — parse + dry-run render in Node. Catches TDZ / ReferenceError before client eval. */
 function toolCompile(transformedCode: string): { issues: string[] } {
   try {
-    // Mirror the sandbox params in DynamicPhysicsScene exactly so compile errors
-    // match what the client will see at runtime.
     // eslint-disable-next-line no-new-func
     new Function(
       "React",
@@ -119,22 +149,25 @@ function toolCompile(transformedCode: string): { issues: string[] } {
       "useEffect",
       "useMemo",
       "THREE",
-      "useThree",       // @react-three/fiber (commonly used by LLMs)
-      "useFrameR3F",    // alias for useFrame (LLM compat — sanitized before this, but keep as fallback)
-      "Html",           // @react-three/drei
-      "Line",           // @react-three/drei
-      "Text",           // @react-three/drei
+      "useThree",
+      "useFrameR3F",
+      "Html",
+      "Line",
+      "Text",
       `${transformedCode}\nreturn typeof GeneratedScene !== 'undefined' ? GeneratedScene : null;`,
     );
-    return { issues: [] };
   } catch (e: unknown) {
     const msg = (e as Error)?.message ?? String(e);
     return {
       issues: [
-        `COMPILE ERROR (JavaScript): ${msg}\nThis is a JavaScript runtime error — fix the syntax or logic that causes it.`,
+        `COMPILE ERROR (JavaScript): ${msg}\nThis is a JavaScript syntax error — fix the syntax that causes it.`,
       ],
     };
   }
+
+  const render = tryRenderGeneratedScene(transformedCode);
+  if (render.ok === false) return { issues: render.issues };
+  return { issues: [] };
 }
 
 /**
@@ -170,10 +203,106 @@ GENERAL:
 - useFrame: animate anything that moves in real life; read delta from useFrame((_, d)=>).
 - Build from real proportions: estimate size in meters, keep relative scale consistent.
 
+═══ SMOOTHNESS — THE #1 QUALITY COMPLAINT IS "IT LOOKS BLOCKY" ═══
+
+Real objects have almost no sharp 90° edges. Blockiness comes from two habits:
+building everything out of boxes, and passing low segment counts. Fix both.
+
+MINIMUM SEGMENT COUNTS — never go below these:
+- <sphereGeometry args={[r, 48, 32]}/>          (not 16, 8)
+- <cylinderGeometry args={[rt, rb, h, 48]}/>    (not 8, 12, 16)
+- <torusGeometry args={[r, t, 24, 96]}/>        (not 8, 16)
+- <capsuleGeometry args={[r, h, 12, 32]}/>
+- <coneGeometry args={[r, h, 48]}/>
+- <circleGeometry args={[r, 64]}/> · <ringGeometry args={[ri, ro, 64]}/>
+These are cheap — a few thousand extra triangles costs nothing at 60fps, and it
+is the single biggest visual difference between amateur and professional output.
+
+PREFER CURVED GEOMETRY OVER BOXES. Pick the construction by asking ONE question:
+"if I spun this part on a lathe, would I get it?"
+- YES, it is round about an axis (bottle, nacelle, hub, nozzle) → latheGeometry.
+- NO, it has a flat 2D OUTLINE with thickness (guitar body, bracket, chassis
+  plate, racket head, phone case) → extrudeGeometry from a curved THREE.Shape.
+- NO, it runs along a path (cable, tube, frame member, handrail) → tubeGeometry.
+Getting this wrong is the most common mistake: a guitar body is an OUTLINE, so it
+is an extrude — revolving a guitar-shaped profile gives you a cylinder, not a guitar.
+
+CRITICAL — a lathe profile MUST have a varying radius. A profile like
+[(0.12,0), (0.12,0.5), (0.06,0.5), (0.06,0)] is a rectangle: revolving it
+produces a plain tube and gains you nothing. Generate 20+ points whose radius
+follows a curve.
+
+
+
+1. REVOLVED / TURNED parts — bottles, nacelles, handles, nozzles, vases, hubs,
+   pistons, anything made on a lathe. Use latheGeometry with a smooth profile:
+     const profile = useMemo(() => {
+       const pts = [];
+       for (let i = 0; i <= 40; i++) {
+         const t = i / 40;                       // 0..1 along the axis
+         const r = 0.18 + 0.06 * Math.sin(t * Math.PI);   // bulged silhouette
+         pts.push(new THREE.Vector2(r, t * 1.2));
+       }
+       return pts;
+     }, []);
+     <mesh><latheGeometry args={[profile, 64]}/><meshStandardMaterial .../></mesh>
+   A lathe profile gives a genuinely curved silhouette that no stack of
+   cylinders can match.
+
+2. FLAT PARTS WITH ROUNDED EDGES — plates, brackets, frames, panels, chassis.
+   Use a THREE.Shape with curves, then extrude WITH A BEVEL (the bevel is what
+   rounds the edges and kills the blocky look):
+     const shape = useMemo(() => {
+       const s = new THREE.Shape();
+       s.moveTo(-0.4, -0.1);
+       s.quadraticCurveTo(0, -0.22, 0.4, -0.1);   // curved, not straight
+       s.lineTo(0.4, 0.1);
+       s.quadraticCurveTo(0, 0.22, -0.4, 0.1);
+       s.closePath();
+       return s;
+     }, []);
+     <mesh>
+       <extrudeGeometry args={[shape, {
+         depth: 0.06, bevelEnabled: true, bevelThickness: 0.012,
+         bevelSize: 0.012, bevelSegments: 6, curveSegments: 32,
+       }]}/>
+     </mesh>
+
+3. SWEPT / CURVED RUNS — cables, hoses, tubing, racket throats, bicycle frame
+   tubes, exhaust pipes, handrails, wiring. Use tubeGeometry along a curve:
+     const curve = useMemo(() => new THREE.CatmullRomCurve3([
+       new THREE.Vector3(0, 0, 0),
+       new THREE.Vector3(0.1, 0.3, 0.02),
+       new THREE.Vector3(0.05, 0.6, 0),
+     ]), []);
+     <mesh><tubeGeometry args={[curve, 64, 0.018, 24, false]}/></mesh>
+   A curved tube reads as one continuous part; three rotated cylinders read as
+   three disconnected sticks.
+
+4. AEROFOILS / BLADES / WINGS / FINS — turbine blades, propellers, rudders,
+   spoilers. Never a flat box. Extrude a cambered aerofoil shape and taper +
+   twist it along its span so it catches light like a real blade.
+
+MATERIALS — smooth shading:
+- Always <meshStandardMaterial/> (or meshPhysicalMaterial). Set roughness and
+  metalness deliberately: polished metal ≈ {metalness:0.9, roughness:0.15},
+  rubber ≈ {metalness:0, roughness:0.9}, paint ≈ {metalness:0.2, roughness:0.4}.
+- NEVER set flatShading — it is the literal "make it look faceted" flag.
+- For custom BufferGeometry always call .computeVertexNormals().
+
+WHEN A BOX IS STILL CORRECT: genuinely rectilinear things — gear teeth,
+structural I-beams, breadboard bodies, bricks, plates seen edge-on. Even then
+prefer an extrude with a small bevel so the edges catch a highlight.
+
 SELF-CHECK before output:
 1. If the topic has wheels, search your code for torusGeometry/cylinderGeometry — confirm rotation [PI/2,0,0] for vertical wheels.
 2. If gears, confirm multiple tooth meshes in a loop with sin/cos.
 3. Confirm ground circle at y=0 exists.
+4. Count your boxGeometry uses. If boxes are more than ~40% of your meshes, you
+   are building a LEGO model — convert the curved parts to lathe/extrude/tube.
+5. Grep your own output for any segment count below the minimums above and raise it.
+6. Confirm at least ONE of latheGeometry / extrudeGeometry / tubeGeometry appears
+   unless the object is genuinely entirely rectilinear.
 
 AVAILABLE SANDBOX GLOBALS — these are the ONLY names you can use:
   React, useRef, useState, useEffect, useMemo  ← from React
@@ -189,6 +318,10 @@ CRITICAL — DO NOT USE THESE (they do not exist in the sandbox):
   ❌ React.useFrame → use useFrame directly
   ❌ Any import statement — all are STRIPPED. Never write import/require.
   ❌ OrbitControls, Stars, Sky, MeshReflectorMaterial — not available.
+  ❌ RoundedBox, Tube, Lathe (drei helpers) — not available. Use the lowercase
+     R3F geometry elements instead: <extrudeGeometry/> with bevelEnabled for
+     rounded boxes, <tubeGeometry/>, <latheGeometry/>. These ARE available
+     because they are intrinsic R3F elements, not drei components.
 
 REACT HOOKS (runtime — invalid hooks crash the canvas):
 - useMemo(fn, DEPS) and useCallback(fn, DEPS): DEPS must be an ARRAY: [] or [x, y]. NEVER undefined, null, or a bare object.
@@ -286,15 +419,23 @@ function staticGeometryAudit(code: string, topic: string): string[] {
 
   // Objects with repeated elements (strings, spokes, teeth, rungs, grids) legitimately
   // generate many meshes via loops — a single `.map()` call can render dozens of meshes
-  // but only appears as one `<mesh>` tag in source. Lower the threshold for these topics.
+  // but only appears as one `<mesh>` tag in source, so loops earn some credit.
+  //
+  // That credit used to be a 3× multiplier against a floor of 8, which let an
+  // 8-mesh scene pass for any topic containing a loop. An 8-part guitar has no
+  // tuners, frets, bracing or saddle, so the floor is now on the number of
+  // DISTINCT part definitions and the loop bonus is modest.
   const hasRepeatedElements = /racket|racquet|string|fence|grid|lattice|spoke|rung|tooth|tee|truss|ladder/.test(t);
-  // Also detect loop-generated meshes: Array.from / .map returning <mesh>
   const hasLoopMeshes = /Array\.from|\.map\s*\(.*<mesh|useMemo.*<mesh/.test(code);
   const meshCount = (code.match(/<mesh\b/g) || []).length;
-  const effectiveMeshCount = hasLoopMeshes ? Math.max(meshCount * 3, meshCount) : meshCount;
-  const minMeshes = hasRepeatedElements || hasLoopMeshes ? 8 : 18;
+  const effectiveMeshCount = hasLoopMeshes ? Math.round(meshCount * 1.5) : meshCount;
+  const minMeshes = hasRepeatedElements || hasLoopMeshes ? 16 : 18;
   if (effectiveMeshCount < minMeshes) {
-    issues.push(`STRUCTURE: Only ${meshCount} <mesh> elements — too simplistic. Build a recognisable object with many sub-parts (target ${minMeshes}+).`);
+    issues.push(
+      `STRUCTURE: Only ${meshCount} distinct <mesh> definitions — too simplistic for "${topic}". ` +
+      `List the real sub-assemblies of the object and give each one geometry ` +
+      `(target ${minMeshes}+ distinct meshes; loops over repeated parts count once each).`,
+    );
   }
 
   const boxCount = (code.match(/<boxGeometry\b/g) || []).length;
@@ -312,8 +453,11 @@ function staticGeometryAudit(code: string, topic: string): string[] {
     issues.push("STRUCTURE: Scene is degenerate (mostly a single primitive family, often box-only). Use multiple geometry types and real sub-assemblies.");
   }
 
+  issues.push(...smoothnessAudit(code, t, meshCount, boxCount, boxesAreIntentional));
+
   return issues;
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // REFERENCE COMPONENT — full PhysicsF1Car shown to generation model
@@ -538,11 +682,19 @@ const STRING_SPAN = 0.38; // half-length of strings inside oval
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Build the structured research brief prompt for any Gemini/LLM call. */
-function buildResearchPrompt(topic: string, params: Record<string, number>): string {
+function buildResearchPrompt(
+  topic: string,
+  params: Record<string, number>,
+  specBlock = "",
+): string {
+  const specSection = specBlock
+    ? `${specBlock}\n\nThe spec sheet above is ALREADY VERIFIED. Every "realDimensions" field you\nwrite below must be consistent with it. Convert its millimetres into the\nrelative ratios this brief asks for; never contradict a verified number.\n\n`
+    : "";
+
   return `You are a world-class technical illustrator and 3D modeller.
 Research "${topic}" thoroughly — look up reference images, engineering diagrams, real product specifications, and existing 3D model breakdowns.
 
-Produce an EXHAUSTIVE structural brief that a Three.js developer will use to build a pixel-accurate 3D model.
+${specSection}Produce an EXHAUSTIVE structural brief that a Three.js developer will use to build a pixel-accurate 3D model.
 Every measurement should be grounded in real-world proportions you found.
 
 Output ONLY a valid JSON object (no markdown, no explanation) with ALL of the following fields:
@@ -594,71 +746,29 @@ REQUIREMENTS:
 - Largest dimension = 1.0 in relative units — everything else is a fraction of that`;
 }
 
-async function runVisualResearch(topic: string, params: Record<string, number>): Promise<string> {
-  const geminiKey = process.env.GOOGLE_API_KEY;
-
-  // ── 1. Gemini 2.0 Flash + Google Search (live web research) ──────────────
-  // Gemini 2.0 Flash can search the web mid-request, giving it access to real
-  // product specs, engineering diagrams, and 3D model references for any topic.
-  if (geminiKey) {
-    try {
-      const searchPrompt = `Search the web for: "${topic} dimensions specifications engineering diagram 3D model parts breakdown measurements"
-
-Use what you find to fill out this exact structural brief for a Three.js developer.
-
-${buildResearchPrompt(topic, params)}`;
-
-      const gRes = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            tools: [{ google_search: {} }],
-            contents: [{ parts: [{ text: searchPrompt }] }],
-            generationConfig: { temperature: 0.1, maxOutputTokens: 4096 },
-          }),
-        },
-      );
-      const gData = await gRes.json();
-      // Gemini 2.0 with grounding concatenates all text parts
-      const parts = gData?.candidates?.[0]?.content?.parts || [];
-      const gTxt = parts.map((p: { text?: string }) => p.text || "").join("");
-      const gm = gTxt.match(/\{[\s\S]*\}/);
-      if (gm && gm[0].length > 600) {
-        console.log(`[generate-scene] Research via Gemini 2.0 Flash + Google Search: ${gm[0].length} chars`);
-        return gm[0];
-      }
-      console.warn("[generate-scene] Gemini 2.0 Flash search returned short result, falling back");
-    } catch (e) {
-      console.warn("[generate-scene] Gemini 2.0 Flash search error:", e);
+/**
+ * Produce the structural brief (parts hierarchy, shapes, colours, geometry
+ * rules). Numbers come from the already-validated spec sheet, which is injected
+ * as `specBlock` so the brief cannot contradict the verified measurements.
+ */
+async function runStructuralBrief(
+  topic: string,
+  params: Record<string, number>,
+  specBlock: string,
+): Promise<string> {
+  // ── 1. Gemini (live model chain, shared with the spec stage) ─────────────
+  const g = await geminiGenerate(buildResearchPrompt(topic, params, specBlock), {
+    timeoutMs: 40_000,
+    json: true,
+    maxOutputTokens: 8192,
+  });
+  if (g) {
+    const gm = g.text.match(/\{[\s\S]*\}/);
+    if (gm && gm[0].length > 600) {
+      console.log(`[generate-scene] Structural brief via ${g.model}: ${gm[0].length} chars`);
+      return gm[0];
     }
-  }
-
-  // ── 2. Gemini 1.5 Flash (training data only — no live search) ────────────
-  if (geminiKey) {
-    try {
-      const gRes = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: buildResearchPrompt(topic, params) }] }],
-            generationConfig: { temperature: 0.1, maxOutputTokens: 4096 },
-          }),
-        },
-      );
-      const gData = await gRes.json();
-      const gTxt = gData?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      const gm = gTxt.match(/\{[\s\S]*\}/);
-      if (gm && gm[0].length > 500) {
-        console.log(`[generate-scene] Research via Gemini 1.5 Flash: ${gm[0].length} chars`);
-        return gm[0];
-      }
-    } catch (e) {
-      console.warn("[generate-scene] Gemini 1.5 Flash research error:", e);
-    }
+    console.warn(`[generate-scene] ${g.model} brief too short (${g.text.length} chars), falling back`);
   }
 
   // ── 3. NVIDIA Nano fallback ───────────────────────────────────────────────
@@ -672,8 +782,8 @@ ${buildResearchPrompt(topic, params)}`;
           Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`,
         },
         body: JSON.stringify({
-          model: "nvidia/llama-3.1-nemotron-nano-8b-v1",
-          messages: [{ role: "user", content: buildResearchPrompt(topic, params) }],
+          model: NVIDIA_RESEARCH_MODEL,
+          messages: [{ role: "user", content: buildResearchPrompt(topic, params, specBlock) }],
           temperature: 0.1,
           max_tokens: 3000,
         }),
@@ -695,7 +805,7 @@ ${buildResearchPrompt(topic, params)}`;
     model: REVIEW_MODEL,
     temperature: 0.15,
     max_tokens: 3000,
-    messages: [{ role: "user", content: buildResearchPrompt(topic, params) }],
+    messages: [{ role: "user", content: buildResearchPrompt(topic, params, specBlock) }],
   });
 
   const txt = res.choices?.[0]?.message?.content || "";
@@ -703,6 +813,57 @@ ${buildResearchPrompt(topic, params)}`;
   const result = m ? m[0] : txt;
   console.log(`[generate-scene] Research via Groq fallback: ${result.length} chars`);
   return result;
+}
+
+export interface VisualResearchResult {
+  /** Combined spec sheet + structural brief, ready to drop into a prompt. */
+  brief: string;
+  spec: SpecSheet | null;
+  validation: SpecValidation | null;
+}
+
+/**
+ * Two-stage research.
+ *
+ * Stage A researches a real reference product and validates its dimensions
+ * deterministically. Stage B writes the structural brief with those verified
+ * numbers already in hand, so the parts hierarchy is built around real
+ * measurements rather than the model's own guesses.
+ *
+ * Running these sequentially rather than in parallel costs ~10s but keeps the
+ * two outputs from contradicting each other.
+ */
+async function runVisualResearch(
+  topic: string,
+  params: Record<string, number>,
+): Promise<VisualResearchResult> {
+  let spec: SpecSheet | null = null;
+  let validation: SpecValidation | null = null;
+  let specBlock = "";
+
+  try {
+    const result = await researchSpecSheet(topic, { timeoutMs: 35_000 });
+    spec = result.spec;
+    validation = result.validation;
+    if (spec) {
+      specBlock = formatSpecForPrompt(spec, validation);
+      console.log(
+        `[generate-scene] Spec sheet: "${spec.referenceProduct}" — ` +
+        `${spec.dimensions.length} dims, valid=${validation.valid}` +
+        (validation.errors.length ? ` (${validation.errors.join("; ")})` : ""),
+      );
+    }
+  } catch (e) {
+    console.warn("[generate-scene] spec stage failed:", String(e).slice(0, 160));
+  }
+
+  const structural = await runStructuralBrief(topic, params, specBlock);
+
+  return {
+    brief: specBlock ? `${specBlock}\n\n${structural}` : structural,
+    spec,
+    validation,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -727,6 +888,7 @@ async function runCodeGeneration(
   attempt: number,
   accuracyHistory: unknown,
   sessionFeedback: string,
+  budgetMs?: number,
 ): Promise<string> {
 
   const paramLines = Object.entries(params)
@@ -756,8 +918,23 @@ EXPECTATIONS:
 - Take your time — quality matters far more than speed
 - Nemotron Ultra has strong reasoning: USE IT — plan the scene mentally, then emit code step by step`;
 
+  // The research block may lead with a validated spec sheet. Where it does, the
+  // numbers in it are authoritative — the model's job is geometry, not guessing
+  // measurements.
+  const hasSpecSheet = visualResearch.includes("VERIFIED SPEC SHEET");
   const researchSection = visualResearch
-    ? `\n\n══════ VISUAL RESEARCH (what "${topic}" looks like) ══════\n${visualResearch}\n══════ END RESEARCH ══════\n`
+    ? `\n\n══════ RESEARCH — what "${topic}" actually is ══════\n${visualResearch}\n══════ END RESEARCH ══════\n${
+        hasSpecSheet
+          ? `\nHOW TO USE THE SPEC SHEET:\n` +
+            `- Define the verified numbers as named constants at the top of your component,\n` +
+            `  e.g. const SPEC = { overallLength: 685.8, headWidth: 267 }; // mm, verified\n` +
+            `- Derive every geometry argument from those constants by dividing through the\n` +
+            `  largest dimension, so proportions are exactly right at any display scale.\n` +
+            `- Do NOT round them to convenient numbers and do NOT substitute your own.\n` +
+            `- If a dimension you need is missing from the sheet, derive it from the ones\n` +
+            `  present rather than inventing an unrelated value.\n`
+          : ""
+      }`
     : "";
 
   const feedbackSection = reviewerFeedback
@@ -833,17 +1010,20 @@ After the blueprint comment, write the complete GeneratedScene component.
 15. Keep the main model centered near origin and on/above ground (avoid huge offsets that hide the object from camera).
 16. Use high-contrast materials. Avoid all-dark scenes; include at least one readable light-toned material for silhouette clarity.
 17. useMemo / useCallback: second argument MUST be an array ([] or [a,b]). Never undefined or null.
-18. Refs used as arrays: initialise with useRef([]) OR guard every .current.forEach/.map/.filter with Array.isArray(ref.current) check.
-19. Output ONLY the blueprint comment + component code. Zero markdown fences. Zero prose explanation.`;
+18. DECLARATION ORDER: every const/let MUST appear BEFORE its first use. useMemo(fn, deps) runs fn immediately on render — referencing a const declared below causes "Cannot access X before initialization". Compute derived flags (e.g. isTensionWarning, isOverLimit) at the top of the component, before any useMemo/JSX that uses them.
+19. Refs used as arrays: initialise with useRef([]) OR guard every .current.forEach/.map/.filter with Array.isArray(ref.current) check.
+20. Output ONLY the blueprint comment + component code. Zero markdown fences. Zero prose explanation.`;
 
-  // Try Nemotron Ultra (streaming) first — 16k tokens so it can write a full blueprint + code
+  // Try the Nemotron cascade first — 16k tokens so it can write a full blueprint + code.
+  // Leave room inside the caller's remaining budget for the Groq fallback below.
   if (process.env.NVIDIA_API_KEY) {
+    const nvidiaBudget = budgetMs
+      ? Math.max(30_000, Math.min(150_000, budgetMs - 30_000))
+      : 150_000;
     try {
-      const content = await streamNvidia(systemMsg, userMsg, 16000);
-      if (content.length > 500) return content;
-      console.warn(`[generate-scene] Nemotron Ultra attempt ${attempt}: only ${content.length} chars, retrying with Groq`);
+      return await streamNvidia(systemMsg, userMsg, 16000, nvidiaBudget);
     } catch (e) {
-      console.warn("[generate-scene] Nemotron Ultra error:", e);
+      console.warn(`[generate-scene] NVIDIA chain exhausted on attempt ${attempt}, falling back to Groq:`, e);
     }
   }
 
@@ -921,9 +1101,13 @@ ${code.slice(0, 12000)}
 // ─────────────────────────────────────────────────────────────────────────────
 // STREAMING HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
-async function streamNvidia(system: string, user: string, maxTokens: number): Promise<string> {
-  // Large token budgets (16k) can take 2+ minutes — use a generous timeout
-  const timeoutMs = maxTokens > 8000 ? 150_000 : 90_000;
+async function streamOneNvidia(
+  model: string,
+  system: string,
+  user: string,
+  maxTokens: number,
+  timeoutMs: number,
+): Promise<string> {
   const res = await fetch(`${NVIDIA_BASE}/chat/completions`, {
     method: "POST",
     signal: AbortSignal.timeout(timeoutMs),
@@ -932,7 +1116,7 @@ async function streamNvidia(system: string, user: string, maxTokens: number): Pr
       Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`,
     },
     body: JSON.stringify({
-      model: NVIDIA_MODEL,
+      model,
       messages: [
         { role: "system", content: system },
         { role: "user", content: user },
@@ -940,10 +1124,46 @@ async function streamNvidia(system: string, user: string, maxTokens: number): Pr
       temperature: 0.25,
       max_tokens: maxTokens,
       stream: true,
+      chat_template_kwargs: NVIDIA_NO_THINKING,
     }),
   });
-  if (!res.ok) throw new Error(`NVIDIA ${res.status}: ${await res.text()}`);
+  if (!res.ok) {
+    throw new Error(`NVIDIA ${model} ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  }
   return collectSSE(res);
+}
+
+/**
+ * Runs the whole cascade concurrently and returns the strongest usable answer.
+ *
+ * Trying models one after another meant a slow leader burned its entire timeout
+ * (~150s) producing nothing before the next model even started, and that dead
+ * time repeated on every repair turn. Firing them together costs extra tokens but
+ * bounds latency at the first useful response while still preferring the stronger
+ * model whenever it lands inside the budget.
+ */
+async function streamNvidia(
+  system: string,
+  user: string,
+  maxTokens: number,
+  budgetMs = maxTokens > 8000 ? 150_000 : 90_000,
+): Promise<string> {
+  const winner = await raceWithPreference(
+    NVIDIA_CODE_CHAIN.map(
+      (model) => () => streamOneNvidia(model, system, user, maxTokens, budgetMs),
+    ),
+    {
+      isUsable: (content) => content.length > 500,
+      budgetMs,
+      upgradeWindowMs: 45_000,
+      onResolve: (i, content) =>
+        console.log(`[generate-scene] code via ${NVIDIA_CODE_CHAIN[i]}: ${content.length} chars`),
+      onError: (i, e) =>
+        console.warn(`[generate-scene] NVIDIA ${NVIDIA_CODE_CHAIN[i]} failed:`, String(e).slice(0, 140)),
+    },
+  );
+  if (!winner) throw new Error("NVIDIA chain exhausted");
+  return winner.value;
 }
 
 async function streamGroq(system: string, user: string, maxTokens: number): Promise<string> {
@@ -1012,19 +1232,59 @@ export async function POST(req: Request) {
   const safeCtx      = physicsContext || "";
   const enc          = new TextEncoder();
 
+  // Hard ceiling on a single generation. The agent loop checks this before
+  // starting any further work, so a request degrades to "best scene so far"
+  // instead of running for the 20+ minutes the serial cascade used to take.
+  const deadlineAt = Date.now() + SCENE_BUDGET_MS;
+  const msLeft = () => deadlineAt - Date.now();
+
   const stream = new ReadableStream({
     async start(controller) {
+      // The client aborting used to surface as a stream of "Invalid state:
+      // Controller is already closed" errors, because every later stage kept
+      // enqueueing into a dead controller.
+      let closed = false;
+      req.signal?.addEventListener("abort", () => { closed = true; });
+
       function send(data: Record<string, unknown>) {
-        controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`));
+        if (closed || req.signal?.aborted) return;
+        try {
+          controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`));
+        } catch {
+          closed = true;
+        }
       }
 
       try {
         // ── Research ──────────────────────────────────────────────────────────
-        send({ event: "step", tool: "research", status: "running", label: "Studying the topic…" });
+        send({ event: "step", tool: "research", status: "running", label: "Researching real specifications…" });
         let visualResearch = "";
         try {
-          visualResearch = await runVisualResearch(topic, safeParams);
-          send({ event: "step", tool: "research", status: "pass", label: "Topic researched" });
+          const research = await runVisualResearch(topic, safeParams);
+          visualResearch = research.brief;
+
+          const { spec, validation } = research;
+          if (spec && validation) {
+            // Surface the spec so the editor can show what it was built from and
+            // cache it against the topic.
+            send({
+              event: "spec_sheet",
+              spec,
+              validation,
+            });
+            const label = validation.valid
+              ? `Verified: ${spec.referenceProduct || spec.topic} (${spec.dimensions.length} dimensions)`
+              : `Specs found but ${validation.errors.length} check(s) failed — proceeding with caution`;
+            send({
+              event: "step",
+              tool: "research",
+              status: validation.valid ? "pass" : "warn",
+              label,
+              issues: validation.errors,
+            });
+          } else {
+            send({ event: "step", tool: "research", status: "warn", label: "No verified specs — using model recall" });
+          }
         } catch {
           send({ event: "step", tool: "research", status: "warn", label: "Research skipped" });
         }
@@ -1033,25 +1293,38 @@ export async function POST(req: Request) {
         send({ event: "step", tool: "generate", status: "running", turn: 1, label: "Writing 3D component…" });
         let rawCode = await runCodeGeneration(
           topic, safeSimType, safeParams, safeCtx,
-          visualResearch, null, 1, accHist, sessionFeedback,
+          visualResearch, null, 1, accHist, sessionFeedback, msLeft(),
         );
         send({ event: "step", tool: "generate", status: "pass", turn: 1, label: "Component written" });
 
         // ── Agent tool-chain loop ─────────────────────────────────────────────
         let finalCode        = "";
         let finalTransformed = "";
+        // Any candidate that compiled, kept so budget exhaustion still ships a
+        // working scene rather than erroring out after minutes of work.
+        let bestCode        = "";
+        let bestTransformed = "";
+        let bestIssueCount  = Number.POSITIVE_INFINITY;
 
         for (let turn = 1; turn <= MAX_AGENT_TURNS; turn++) {
           const allIssues: string[] = [];
 
           // ── Tool 1: strip ─────────────────────────────────────────────────
           send({ event: "step", tool: "strip", status: "running", turn, label: "Checking structure…" });
-          const { code, issues: stripIssues } = toolStrip(rawCode);
+          const { code, issues: stripIssues, polishFixes } = toolStrip(rawCode);
           if (stripIssues.length) {
             send({ event: "step", tool: "strip", status: "fail", turn, issues: stripIssues, label: "Structure invalid" });
             allIssues.push(...stripIssues);
+          } else if (polishFixes.length) {
+            send({
+              event: "step", tool: "strip", status: "pass", turn,
+              label: `Structure OK — smoothed ${polishFixes.length} geometry setting(s)`,
+              issues: polishFixes,
+            });
           } else {
             send({ event: "step", tool: "strip", status: "pass", turn, label: "Structure OK" });
+          }
+          if (!stripIssues.length) {
 
             // ── Tool 2: audit ────────────────────────────────────────────────
             send({ event: "step", tool: "audit", status: "running", turn, label: "Auditing geometry & hooks…" });
@@ -1080,6 +1353,13 @@ export async function POST(req: Request) {
                 allIssues.push(...compileIssues);
               } else {
                 send({ event: "step", tool: "compile", status: "pass", turn, label: "Compiles successfully" });
+
+                // Remember the cleanest compiling candidate seen so far.
+                if (allIssues.length < bestIssueCount) {
+                  bestIssueCount  = allIssues.length;
+                  bestCode        = code;
+                  bestTransformed = transformed!;
+                }
 
                 // ── Tool 5: review ─────────────────────────────────────────
                 // On the last turn: if compile passed, accept without extra API call.
@@ -1128,21 +1408,40 @@ export async function POST(req: Request) {
             break;
           }
 
+          // Another rewrite is only worth starting if it can actually finish.
+          if (msLeft() < TURN_COST_ESTIMATE_MS) {
+            send({
+              event: "step", tool: "fix", status: "warn", turn,
+              label: `Time budget reached after ${turn} turn(s) — keeping best scene so far`,
+            });
+            break;
+          }
+
           // ── Fix: regenerate with consolidated feedback ────────────────────
           const feedbackText = allIssues.map((iss, n) => `${n + 1}. ${iss}`).join("\n");
           send({ event: "step", tool: "fix", status: "running", turn, label: `Rewriting — fixing ${allIssues.length} issue(s)…` });
           rawCode = await runCodeGeneration(
             topic, safeSimType, safeParams, safeCtx,
-            visualResearch, feedbackText, turn + 1, accHist, sessionFeedback,
+            visualResearch, feedbackText, turn + 1, accHist, sessionFeedback, msLeft(),
           );
           send({ event: "step", tool: "fix", status: "pass", turn, label: "Code rewritten" });
         }
 
         // ── Done ─────────────────────────────────────────────────────────────
-        if (!finalCode || !finalTransformed) {
+        // Fall back to the best compiling candidate: after minutes of work, a scene
+        // carrying a few audit notes is far more useful than an error.
+        const shipCode        = finalCode || bestCode;
+        const shipTransformed = finalTransformed || bestTransformed;
+        if (!shipCode || !shipTransformed) {
           send({ event: "error", error: "Could not produce a valid GeneratedScene after all agent turns." });
         } else {
-          send({ event: "complete", code: finalTransformed, rawCode: finalCode });
+          if (!finalCode) {
+            send({
+              event: "step", tool: "review", status: "warn",
+              label: `Shipping best compiling scene (${bestIssueCount} open note(s))`,
+            });
+          }
+          send({ event: "complete", code: shipTransformed, rawCode: shipCode });
         }
       } catch (e: unknown) {
         const msg = (e as Error)?.message ?? String(e);

@@ -8,10 +8,17 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { retrievePhysicsKnowledge, classifySimType, PHYSICS_KB, type PhysicsEntry } from '@/lib/physics-kb';
+import { researchSpecSheet } from '@/lib/specSheet';
 
-const NVIDIA_BASE      = 'https://integrate.api.nvidia.com/v1';
-const NVIDIA_THINKING  = 'meta/llama-3.1-405b-instruct';
-const NVIDIA_FAST      = 'nvidia/llama-3.1-nemotron-nano-8b-v1';
+import {
+  NVIDIA_BASE,
+  NVIDIA_THINKING,
+  NVIDIA_FAST,
+  NVIDIA_NO_THINKING,
+  assertLiveModels,
+} from '@/lib/models';
+
+assertLiveModels('agent-pipeline', [NVIDIA_THINKING, NVIDIA_FAST]);
 
 // ── Structural tool implementations (run locally, zero latency) ────────────
 function validateThresholds(paramName: string, def: number, warn: number, crit: number): string[] {
@@ -35,30 +42,95 @@ function checkParamBounds(paramName: string, min: number, max: number): string[]
   return issues;
 }
 
-// ── Research Agent: pure deterministic — no API call ─────────────────────
-function runResearchAgent(topic: string): { brief: string; simType: string; entry: PhysicsEntry | null; toolCalls: number } {
+// ── Research Agent ────────────────────────────────────────────────────────
+// Two paths. Topics covered by the local KB resolve instantly with zero API
+// calls. Topics that are NOT in the KB — which is most of what users type —
+// previously fell through to a one-line "no entry, use simType=custom" brief,
+// which is why custom topics produced thin notes and no real specs. Those now
+// go out to the spec researcher for real dimensions.
+//
+// toolCalls is the count of work actually performed, not a constant. The old
+// code reported 2 unconditionally even when it did nothing but a dictionary
+// lookup.
+interface ResearchResult {
+  brief: string;
+  simType: string;
+  entry: PhysicsEntry | null;
+  toolCalls: number;
+  /** True when a live spec lookup was needed and returned validated numbers. */
+  researched: boolean;
+  specSummary: string | null;
+}
+
+async function runResearchAgent(topic: string): Promise<ResearchResult> {
   // Classifier is authoritative — KB retrieval alone can mis-rank ("pendulum" → Newton's cradle).
   const simType = classifySimType(topic);
   const kb = (PHYSICS_KB as Record<string, PhysicsEntry>)[simType] ?? null;
   let entry: PhysicsEntry | null = kb;
+  let toolCalls = 1; // classifySimType
   if (!entry) {
     const r = retrievePhysicsKnowledge(topic);
+    toolCalls++; // retrievePhysicsKnowledge
     if (r?.simType === simType) entry = r;
   }
 
-  let brief = '';
   if (entry) {
-    brief =
+    const brief =
       `Domain: ${entry.domain}\n` +
       `Equations: ${entry.equations.join(' | ')}\n` +
       `Real-world specs: ${Object.entries(entry.realWorldSpecs).map(([k, v]) => `${k}=${v}`).join(', ')}\n` +
       `Failure modes: ${entry.failureModes.join('; ')}\n` +
       `Param guide: ${JSON.stringify(entry.paramGuide ?? {})}`;
-  } else {
-    brief = `Topic: ${topic}. No specific knowledge base entry. Use simType=custom with descriptive physics parameters.`;
+    return { brief, simType, entry, toolCalls, researched: false, specSummary: null };
   }
 
-  return { brief, simType, entry, toolCalls: 2 };
+  // Unknown topic — go find real numbers instead of shrugging.
+  try {
+    const { spec, validation, attempts } = await researchSpecSheet(topic, {
+      timeoutMs: 30_000,
+      retryOnInvalid: false, // keep the notes pipeline responsive
+    });
+    toolCalls += attempts;
+
+    if (spec && spec.dimensions.length) {
+      const dims = spec.dimensions
+        .map((d) => `${d.key}=${Math.round(d.value * 100) / 100}${d.unit}`)
+        .join(', ');
+      const attrs = Object.entries(spec.attributes)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(', ');
+
+      const brief =
+        `Topic: ${topic} (no KB entry — researched live)\n` +
+        `Reference product: ${spec.referenceProduct || '(generic)'}\n` +
+        `Category: ${spec.category || 'unknown'}\n` +
+        `Researched specs (validated ${validation.valid ? 'OK' : 'WITH WARNINGS'}): ${dims}\n` +
+        (attrs ? `Attributes: ${attrs}\n` : '') +
+        (spec.notes.length ? `Notes: ${spec.notes.join('; ')}\n` : '') +
+        (validation.errors.length ? `Validation issues: ${validation.errors.join('; ')}\n` : '') +
+        `Use simType=custom. Base every parameter default on the researched numbers above.`;
+
+      return {
+        brief,
+        simType,
+        entry: null,
+        toolCalls,
+        researched: true,
+        specSummary: `${spec.referenceProduct || topic} — ${spec.dimensions.length} dimensions`,
+      };
+    }
+  } catch (e) {
+    console.warn('[agent-pipeline] spec research failed:', String(e).slice(0, 140));
+  }
+
+  return {
+    brief: `Topic: ${topic}. No specific knowledge base entry and live research unavailable. Use simType=custom with descriptive physics parameters.`,
+    simType,
+    entry: null,
+    toolCalls,
+    researched: false,
+    specSummary: null,
+  };
 }
 
 // ── Validator Agent: pure structural checks — no API call ─────────────────
@@ -350,7 +422,10 @@ async function* nvidiaStream(messages: object[], model: string, maxTokens: numbe
     method: 'POST',
     signal: AbortSignal.timeout(timeoutMs),
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.NVIDIA_API_KEY}` },
-    body: JSON.stringify({ model, messages, temperature: 0.45, max_tokens: maxTokens, stream: true }),
+    body: JSON.stringify({
+      model, messages, temperature: 0.45, max_tokens: maxTokens, stream: true,
+      chat_template_kwargs: NVIDIA_NO_THINKING,
+    }),
   });
   if (!res.ok) throw new Error(`NVIDIA API error: ${res.status}`);
   const reader = res.body!.getReader();
@@ -419,17 +494,20 @@ export async function POST(req: Request) {
         // ────────────────────────────────────────────────────────────────
         // AGENT 1 — Research: INSTANT (local KB, 0 API calls)
         // ────────────────────────────────────────────────────────────────
-        send({ event: 'agent_start', agent: 'research', label: 'Research Agent', icon: '🔍', msg: 'Querying physics knowledge base...' });
+        send({ event: 'agent_start', agent: 'research', label: 'Research Agent', icon: '🔍', msg: 'Classifying topic and gathering real specifications...' });
 
-        const research = runResearchAgent(topic);
+        const research = await runResearchAgent(topic);
 
         send({
           event: 'agent_complete',
           agent: 'research',
-          msg: `Classified: ${research.simType} | ${research.toolCalls} tool calls | RAG retrieved`,
+          msg: research.researched
+            ? `Classified: ${research.simType} | researched live: ${research.specSummary} | ${research.toolCalls} tool calls`
+            : `Classified: ${research.simType} | ${research.toolCalls} tool calls | KB retrieved`,
           brief: research.brief.slice(0, 200),
           simType: research.simType,
           toolCalls: research.toolCalls,
+          researched: research.researched,
         });
 
         // ────────────────────────────────────────────────────────────────
@@ -520,6 +598,7 @@ export async function POST(req: Request) {
           simType: research.simType,
           totalToolCalls: research.toolCalls + validation.toolCalls,
           ragUsed: !!research.entry,
+          specResearched: research.researched,
         });
 
       } catch (err) {

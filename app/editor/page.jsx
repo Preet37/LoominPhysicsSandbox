@@ -16,6 +16,7 @@ import JournalsNav from "./components/JournalsNav";
 import AgentStatusBar from "./components/AgentStatusBar";
 import InteractiveNotesSurface from "./components/InteractiveNotesSurface";
 import ParamSliderPanel from "./components/ParamSliderPanel";
+import SpecSheetBadge from "./components/SpecSheetBadge";
 import EquationsPanel from "./components/EquationsPanel";
 import GraphsPanel from "./components/GraphsPanel";
 import PythonPanel from "./components/PythonPanel";
@@ -187,6 +188,27 @@ function evaluateNotesQuality(text, simConfig) {
   return { score: Math.round((passCount / Math.max(1, checks.length)) * 100), checks };
 }
 
+// ── Shared model library ──────────────────────────────────────────────────────
+// Accepted CAD models are stored server-side and replayed for any later session
+// on the same topic, so these two calls are what curate that library.
+
+async function postToModelLibrary(topic, action) {
+  if (!topic) return null;
+  try {
+    const res = await fetch("/api/model-library", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ topic, action }),
+    });
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+const rejectStoredModel = (topic) => postToModelLibrary(topic, "reject");
+const markModelAccurate = (topic) => postToModelLibrary(topic, "verify");
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function PhysicsEditorPage() {
@@ -199,6 +221,7 @@ export default function PhysicsEditorPage() {
   const mergeVar           = useLoominStore((s) => s.mergeVar);
   const setSimConfig       = useLoominStore((s) => s.setSimConfig);
   const setSceneCode       = useLoominStore((s) => s.setSceneCode);
+  const setSpecSheet       = useLoominStore((s) => s.setSpecSheet);
   const recordVisualAccuracy = useLoominStore((s) => s.recordVisualAccuracy);
   const setTopic           = useLoominStore((s) => s.setTopic);
   const setQuality         = useLoominStore((s) => s.setQuality);
@@ -224,6 +247,7 @@ export default function PhysicsEditorPage() {
   const equations    = active?.equations ?? [];
   const sources      = active?.sources ?? [];
   const wikiArticle  = active?.wikiArticle ?? null;
+  const specSheet    = active?.specSheet ?? null;
   const artifactsGenerating = active?.artifactsGenerating ?? false;
 
   const [difficulty, setDifficulty]     = useState(1);
@@ -233,6 +257,7 @@ export default function PhysicsEditorPage() {
   const [askDrawerOpen, setAskDrawerOpen] = useState(false);
   const [physicsState, setPhysicsState] = useState({ state: "OPTIMAL", explanation: "", fixedParams: {} });
   const [agentSteps, setAgentSteps]     = useState([]);
+  const [geometryReload, setGeometryReload] = useState(0);
   const [panelMode, setPanelMode]       = useState("both");
   const [agentStates, setAgentStates]   = useState({ research: { status: "idle", msg: "", toolCalls: 0 }, design: { status: "idle", msg: "", toolCalls: 0 }, validator: { status: "idle", msg: "", toolCalls: 0 } });
   const [pipelineMeta, setPipelineMeta] = useState({ totalToolCalls: 0, ragUsed: false, visible: false });
@@ -369,7 +394,11 @@ export default function PhysicsEditorPage() {
 
       if (!knownTypes.includes(finalSimType)) {
         setSceneCode(null);
-        generateSceneCode(topic, finalSimType, parseParams(cleanDisplay(fullText)), null);
+        // High Quality → Blender/OpenSCAD GLB (ProceduralGLBModel).
+        // Fast → lightweight Three.js code generation (~30s, lower fidelity).
+        if (quality === "fast") {
+          generateSceneCode(topic, finalSimType, parseParams(cleanDisplay(fullText)), null);
+        }
       }
 
       // Always fire artifact generation — runs in background, non-blocking
@@ -416,6 +445,8 @@ export default function PhysicsEditorPage() {
                 if (idx >= 0) { const next = [...prev]; next[idx] = ev; return next; }
                 return [...prev, ev];
               });
+            } else if (ev.event === "spec_sheet") {
+              setSpecSheet(ev.spec, ev.validation);
             } else if (ev.event === "complete") {
               setSceneCode(ev.code);
               setAgentSteps([]);
@@ -426,13 +457,17 @@ export default function PhysicsEditorPage() {
         }
       }
     } catch (e) { console.warn("[generate-scene]", e); setAgentSteps([]); }
-  }, [vars, setSceneCode]);
+  }, [vars, setSceneCode, setSpecSheet]);
 
   const handleRegenerate = useCallback((feedback) => {
     if (!activeTopic) return;
-    setSceneCode(null);
-    generateSceneCode(activeTopic, simConfig?.simType || "custom", vars, feedback);
-  }, [activeTopic, simConfig, vars, generateSceneCode, setSceneCode]);
+    if (quality === "fast") {
+      setSceneCode(null);
+      generateSceneCode(activeTopic, simConfig?.simType || "custom", vars, feedback);
+    } else {
+      setGeometryReload((k) => k + 1);
+    }
+  }, [activeTopic, simConfig, vars, quality, generateSceneCode, setSceneCode]);
 
   const handleAutoFix = useCallback(() => {
     if (!simConfig) return;
@@ -518,7 +553,9 @@ export default function PhysicsEditorPage() {
       // Generate scene if not a built-in type
       if (!knownTypes.includes(finalSimType)) {
         setSceneCode(null);
-        generateSceneCode(sourceTopic, finalSimType, parsedVars, null);
+        if (quality === "fast") {
+          generateSceneCode(sourceTopic, finalSimType, parsedVars, null);
+        }
       }
 
       // Fire the full artifact pipeline in background
@@ -529,7 +566,7 @@ export default function PhysicsEditorPage() {
       const topic = source.detectedTopic?.replace(/_/g, " ") || source.name?.replace(/\.[^.]+$/, "") || "physics";
       generateNotes(topic, "");
     }
-  }, [setEditorValue, setSimConfig, setVars, renameJournal, activeId, setActiveTab, generateNotes, generateArtifacts, generateSceneCode, setSceneCode, setTopic]);
+  }, [setEditorValue, setSimConfig, setVars, renameJournal, activeId, setActiveTab, generateNotes, generateArtifacts, generateSceneCode, setSceneCode, setTopic, quality]);
 
   // ── Derived values ────────────────────────────────────────────────────────
 
@@ -826,12 +863,18 @@ export default function PhysicsEditorPage() {
                     {/* Spacer */}
                     <div className="flex-1 min-w-0" />
 
+                    {/* What real product's measurements this was built from */}
+                    <SpecSheetBadge specSheet={specSheet} />
+
                     {/* Visual accuracy buttons — compact icon+text */}
                     {simType && (
                       <>
                         <button
                           type="button"
-                          onClick={() => recordVisualAccuracy(true, activeTopic, simType)}
+                          onClick={() => {
+                            recordVisualAccuracy(true, activeTopic, simType);
+                            markModelAccurate(activeTopic);
+                          }}
                           title="Mark visual as accurate"
                           className="flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/25 text-emerald-300 text-[10px] font-medium transition flex-shrink-0"
                         >
@@ -841,11 +884,15 @@ export default function PhysicsEditorPage() {
                         <button
                           type="button"
                           title="Mark visual as inaccurate — triggers regeneration"
-                          onClick={() => {
+                          onClick={async () => {
                             recordVisualAccuracy(false, activeTopic, simType);
-                            if (sceneCode) {
+                            if (quality === "fast" && sceneCode) {
                               setSceneCode(null);
                               generateSceneCode(activeTopic, simType, vars, "USER MARKED THE 3D VISUAL AS INACCURATE. Rebuild from scratch with correct geometry.");
+                            } else {
+                              // Drop the stored model first, or the rebuild just replays it.
+                              await rejectStoredModel(activeTopic);
+                              setGeometryReload((k) => k + 1);
                             }
                           }}
                           className="flex items-center gap-1 px-2 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/25 text-rose-300 text-[10px] font-medium transition flex-shrink-0"
@@ -874,6 +921,9 @@ export default function PhysicsEditorPage() {
                       simConfig={simConfig}
                       topic={activeTopic}
                       sceneCode={sceneCode}
+                      quality={quality}
+                      specSheet={specSheet}
+                      geometryReload={geometryReload}
                       onRegenerate={handleRegenerate}
                       agentSteps={agentSteps}
                     />

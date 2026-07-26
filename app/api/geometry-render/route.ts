@@ -1,5 +1,11 @@
 import { NextResponse } from "next/server";
 import Groq from "groq-sdk";
+import { openScadAircraftFromSpec, openScadCarFromSpec, openScadRacketFromSpec } from "@/lib/specToCad";
+import { researchSpecSheet } from "@/lib/specSheet";
+import type { SpecSheet } from "@/lib/specSheet";
+import { planToOpenScad, researchGeometryPlan } from "@/lib/geometryPlan";
+import { lookupModel, saveModel } from "@/lib/modelLibrary";
+import { ensureRenderWorker, resolveRenderWorkerUrl } from "@/lib/ensureRenderWorker";
 
 // Headless geometry render pipeline
 // Blender 3.4 (Debian): read_factory_settings(use_empty=True) clears ALL addons —
@@ -13,7 +19,7 @@ type ParamsMap = Record<string, number | string>;
 type TopicCategory =
   | "car" | "aircraft" | "rocket" | "building" | "bottle"
   | "robot" | "bridge" | "turbine" | "ship" | "bicycle" | "unicycle"
-  | "engine" | "satellite" | "microscope" | "guitar" | "generic";
+  | "engine" | "satellite" | "microscope" | "guitar" | "racket" | "generic";
 
 function classifyTopic(topic: string): TopicCategory {
   const t = topic.toLowerCase();
@@ -37,6 +43,7 @@ function classifyTopic(topic: string): TopicCategory {
   if (/(satellite|space station|iss|hubble|telescope)/.test(t)) return "satellite";
   if (/(microscope|telescope|binoculars|periscope|lens|optic)/.test(t)) return "microscope";
   if (/(guitar|violin|cello|piano|drum|instrument|harp)/.test(t)) return "guitar";
+  if (/(tennis racket|tenis racket|racquet|\bracket\b|badminton|squash racket)/.test(t)) return "racket";
   return "generic";
 }
 
@@ -67,8 +74,11 @@ except Exception as _e:
 `.trim();
 
 // ── Topic-aware OpenSCAD templates ───────────────────────────────────────────
-function deterministicOpenScadScript(topic: string): string {
+function deterministicOpenScadScript(topic: string, spec?: SpecSheet | null): string {
   const cat = classifyTopic(topic);
+  if (cat === "car") return openScadCarFromSpec(topic, spec);
+  if (cat === "aircraft") return openScadAircraftFromSpec(topic, spec);
+  if (cat === "racket") return openScadRacketFromSpec(topic, spec);
 
   const templates: Record<TopicCategory, string> = {
     car: `
@@ -467,6 +477,26 @@ translate([0,-0.8,0.18]) cube([0.7,0.1,0.1],center=true);
 for(x=[-0.09,-0.05,-0.01,0.01,0.05,0.09])
   translate([x,0.9,0.2]) cube([0.015,3.6,0.015],center=true);
 `,
+    racket: `
+$fn = 64;
+// --- ${topic} ---
+module head() {
+  rotate([90,0,0]) linear_extrude(height=0.025) {
+    scale([1,1.25]) circle(r=0.11);
+    for(a=[0:30:330]) rotate(a) translate([0.09,0,0]) circle(r=0.008);
+  }
+}
+module throat() {
+  hull() {
+    translate([0,0,0.02]) scale([0.35,0.5,1]) sphere(r=0.04);
+    translate([0,-0.08,0.02]) scale([0.2,0.35,1]) sphere(r=0.03);
+  }
+}
+head();
+throat();
+translate([0,-0.55,0.02]) cylinder(h=0.55, r=0.012, $fn=32);
+translate([0,-0.82,0.02]) cube([0.09,0.14,0.025], center=true);
+`,
     generic: `
 $fn = 48;
 // --- ${topic} ---
@@ -576,7 +606,7 @@ function deterministicBlenderScript(topic: string, params: ParamsMap): string {
     bridge: "(0.6,0.55,0.5,1)", turbine: "(0.9,0.9,0.88,1)", ship: "(0.25,0.35,0.5,1)",
     bicycle: "(0.1,0.4,0.9,1)", unicycle: "(0.1,0.4,0.9,1)", engine: "(0.45,0.42,0.38,1)",
     satellite: "(0.7,0.75,0.8,1)", microscope: "(0.85,0.85,0.82,1)", guitar: "(0.6,0.28,0.05,1)",
-    generic: "(0.4,0.55,0.9,1)",
+    racket: "(0.12,0.13,0.16,1)", generic: "(0.4,0.55,0.9,1)",
   };
   const col = colors[cat];
 
@@ -717,19 +747,33 @@ except Exception as _re:
 `.trim();
 }
 
-async function generateOpenScadScript(topic: string, params: ParamsMap, feedback: string | null): Promise<string> {
-  if (!process.env.GROQ_API_KEY) return deterministicOpenScadScript(topic);
+async function generateOpenScadScript(
+  topic: string,
+  params: ParamsMap,
+  feedback: string | null,
+  spec?: SpecSheet | null,
+): Promise<string> {
+  const cat = classifyTopic(topic);
+  // Hand-crafted templates beat LLM for recognizable product silhouettes.
+  if (cat === "car" || cat === "aircraft" || cat === "racket") {
+    return deterministicOpenScadScript(topic, spec);
+  }
+
+  if (!process.env.GROQ_API_KEY) return deterministicOpenScadScript(topic, spec);
   try {
+    const specBlock = spec?.dimensions?.length
+      ? `\nVERIFIED DIMENSIONS (use these exact proportions in mm):\n${spec.dimensions.map((d) => `- ${d.label}: ${d.value} ${d.unit}`).join("\n")}\n`
+      : "";
     const completion = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
-      messages: [{ role: "user", content: openScadPrompt(topic, params, feedback) }],
+      messages: [{ role: "user", content: openScadPrompt(topic, params, feedback) + specBlock }],
       temperature: 0.25,
       max_tokens: 2000,
     });
     const raw = stripCodeFences(completion.choices?.[0]?.message?.content || "");
-    return raw || deterministicOpenScadScript(topic);
+    return raw || deterministicOpenScadScript(topic, spec);
   } catch {
-    return deterministicOpenScadScript(topic);
+    return deterministicOpenScadScript(topic, spec);
   }
 }
 
@@ -792,51 +836,139 @@ function isGoodGlb(data: Record<string, unknown>): boolean {
   );
 }
 
+async function getWorkerHealth(): Promise<Record<string, unknown> | null> {
+  const healthUrl = resolveRenderWorkerUrl().replace(/\/render\/?$/, "/health");
+  try {
+    const res = await fetch(healthUrl, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return null;
+    return (await res.json()) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+export async function GET() {
+  const workerUp = await ensureRenderWorker();
+  const workerUrl = resolveRenderWorkerUrl();
+  const ping = workerUp ? await getWorkerHealth() : null;
+  const ok = workerUp && (ping?.ok === true || ping?.status === "ok");
+  return NextResponse.json({
+    ok,
+    workerUrl,
+    hint: ok
+      ? "Render worker reachable"
+      : "CAD worker not running. Restart with: pnpm dev (starts worker automatically)",
+  });
+}
+
+/**
+ * Unknown topics used to fall through to a cube-plus-sphere template, which
+ * renders fine and looks like nothing. Instead, research the object's real
+ * structure and compile that — and if the research cannot produce a plan that
+ * passes structural validation, fail loudly rather than shipping a blob.
+ */
+async function researchedPlanScript(topic: string, spec: SpecSheet | null): Promise<string> {
+  const { plan, validation } = await researchGeometryPlan(topic, spec);
+  if (!plan || !validation.valid) {
+    throw new Error(
+      `Could not work out what "${topic}" looks like. ${validation.errors.join("; ") || "No structural plan was produced."}`,
+    );
+  }
+  return planToOpenScad(plan);
+}
+
 export async function POST(req: Request) {
   try {
-    const { topic, simType, params, generatorHint } = await req.json();
+    const { topic, simType, params, generatorHint, specSheet, forceRegenerate } = await req.json();
+    let spec = (specSheet as SpecSheet | null) ?? null;
     if (!topic || typeof topic !== "string") {
       return NextResponse.json({ success: false, error: "topic is required" }, { status: 400 });
     }
 
+    // A model already built for this topic and never rejected is reused as-is.
+    if (!forceRegenerate) {
+      const hit = lookupModel(topic);
+      if (hit) {
+        console.log(`[geometry-render] library hit for "${topic}" (${hit.entry.hits} hits)`);
+        return NextResponse.json({
+          success: true,
+          glbBase64: hit.glbBase64,
+          thumbnailBase64: hit.thumbnailBase64,
+          score: hit.entry.score,
+          generator: hit.entry.generator,
+          cached: true,
+          libraryKey: hit.entry.key,
+        });
+      }
+    }
+
+    const workerUp = await ensureRenderWorker();
+    if (!workerUp) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Render worker is not running. Stop the dev server and run `pnpm dev` once — it starts the CAD worker automatically.",
+        },
+        { status: 503 },
+      );
+    }
+
+    // Only worth paying for on a cache miss, so it happens after the lookup above.
+    if (!spec?.dimensions?.length) {
+      try {
+        spec = (await researchSpecSheet(topic, { timeoutMs: 25_000 })).spec;
+      } catch {
+        /* geometry generation still works without verified dimensions */
+      }
+    }
+
     const origin = new URL(req.url).origin;
+    const category = classifyTopic(topic);
     const primaryGen = pickGenerator(topic, simType, generatorHint);
     const fallbackGen = primaryGen === "openscad" ? "blender" : "openscad";
-    const workerUrl = process.env.RENDER_WORKER_URL || "http://localhost:8787/render";
-    const threshold = Number(process.env.GEOMETRY_VERIFY_THRESHOLD ?? 70);
+    const workerUrl = resolveRenderWorkerUrl();
     const basePayload = { topic, simType, paramsJson: params || {}, exportFormat: "glb", screenshot: true };
 
-    // 4-attempt cascade: LLM primary → det primary → LLM fallback → det fallback
-    const attempts: Array<{ generator: string; getScript: () => Promise<string> }> = [
-      {
-        generator: primaryGen,
-        getScript: () =>
-          primaryGen === "openscad"
-            ? generateOpenScadScript(topic, params || {}, null)
-            : generateBlenderScript(topic, params || {}, null),
-      },
-      {
-        generator: primaryGen,
-        getScript: async () =>
-          primaryGen === "openscad"
-            ? deterministicOpenScadScript(topic)
-            : deterministicBlenderScript(topic, params || {}),
-      },
-      {
-        generator: fallbackGen,
-        getScript: () =>
-          fallbackGen === "openscad"
-            ? generateOpenScadScript(topic, params || {}, null)
-            : generateBlenderScript(topic, params || {}, null),
-      },
-      {
-        generator: fallbackGen,
-        getScript: async () =>
-          fallbackGen === "openscad"
-            ? deterministicOpenScadScript(topic)
-            : deterministicBlenderScript(topic, params || {}),
-      },
-    ];
+    // Deterministic templates first — LLM OpenSCAD often produces unrecognizable blobs.
+    const attempts: Array<{ generator: string; getScript: () => Promise<string> }> =
+      category === "generic"
+        ? [
+            // No hand-written template for this object, so research its structure.
+            { generator: "openscad", getScript: () => researchedPlanScript(topic, spec) },
+            { generator: "openscad", getScript: () => generateOpenScadScript(topic, params || {}, null, spec) },
+            { generator: "blender", getScript: () => generateBlenderScript(topic, params || {}, null) },
+          ]
+        : [
+            {
+              generator: primaryGen,
+              getScript: async () =>
+                primaryGen === "openscad"
+                  ? deterministicOpenScadScript(topic, spec)
+                  : deterministicBlenderScript(topic, params || {}),
+            },
+            {
+              generator: primaryGen,
+              getScript: () =>
+                primaryGen === "openscad"
+                  ? generateOpenScadScript(topic, params || {}, null, spec)
+                  : generateBlenderScript(topic, params || {}, null),
+            },
+            {
+              generator: fallbackGen,
+              getScript: async () =>
+                fallbackGen === "openscad"
+                  ? deterministicOpenScadScript(topic, spec)
+                  : deterministicBlenderScript(topic, params || {}),
+            },
+            {
+              generator: fallbackGen,
+              getScript: () =>
+                fallbackGen === "openscad"
+                  ? generateOpenScadScript(topic, params || {}, null, spec)
+                  : generateBlenderScript(topic, params || {}, null),
+            },
+          ];
 
     let lastError = "All generation attempts failed";
 
@@ -846,7 +978,8 @@ export async function POST(req: Request) {
       try {
         script = await getScript();
       } catch (e) {
-        console.warn(`[geometry-render] attempt ${i + 1} script gen error:`, e);
+        lastError = e instanceof Error ? e.message : String(e);
+        console.warn(`[geometry-render] attempt ${i + 1} script gen error:`, lastError.slice(0, 200));
         continue;
       }
 
@@ -857,7 +990,27 @@ export async function POST(req: Request) {
         const thumbnailBase64 = data.thumbnailBase64;
         const score = thumbnailBase64 ? await verifyWithVision(topic, String(thumbnailBase64), origin) : 75;
         console.log(`[geometry-render] success: attempt ${i + 1}, gen=${generator}, score=${score}`);
-        return NextResponse.json({ success: true, glbBase64, thumbnailBase64, score, generator, attempt: i });
+
+        // Keep it for every future session — a thumbs-down is what removes it.
+        const saved = saveModel({
+          topic,
+          glbBase64,
+          thumbnailBase64: typeof thumbnailBase64 === "string" ? thumbnailBase64 : null,
+          generator,
+          score,
+          referenceProduct: spec?.referenceProduct ?? null,
+        });
+
+        return NextResponse.json({
+          success: true,
+          glbBase64,
+          thumbnailBase64,
+          score,
+          generator,
+          attempt: i,
+          cached: false,
+          libraryKey: saved?.key ?? null,
+        });
       }
 
       lastError =

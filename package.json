@@ -3,7 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "bash scripts/dev-with-worker.sh",
+    "dev:next": "next dev",
+    "dev:worker": "node render-worker/server.js",
+    "dev:worker:docker": "docker build -t loomin-render render-worker && docker run --rm -p 8787:8787 loomin-render",
+    "setup:cad": "bash scripts/setup-cad.sh",
+    "dev:all": "bash scripts/dev-with-worker.sh",
     "build": "prisma generate && next build",
     "postinstall": "prisma generate",
     "start": "next start",

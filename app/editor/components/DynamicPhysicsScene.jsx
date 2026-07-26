@@ -11,6 +11,7 @@ import React, { useMemo, useRef, useState, useEffect } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import { Html, Environment, Line, Text } from "@react-three/drei";
+import { tryRenderGeneratedScene } from "@/lib/sceneSandbox";
 
 /**
  * LLMs often emit useMemo(fn, undefined) — React requires an array.
@@ -75,6 +76,11 @@ function compileScene(code) {
   if (!code || !code.trim()) return { Component: null, error: "No code provided" };
   try {
     const sanitized = sanitizeGeneratedCode(code);
+
+    const dryRun = tryRenderGeneratedScene(sanitized);
+    if (!dryRun.ok) {
+      return { Component: null, error: dryRun.issues[0] || "Generated scene failed dry-run render" };
+    }
 
     // eslint-disable-next-line no-new-func
     const factory = new Function(

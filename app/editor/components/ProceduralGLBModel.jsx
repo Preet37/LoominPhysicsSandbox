@@ -6,20 +6,6 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader";
 import * as THREE from "three";
 import { Html } from "@react-three/drei";
 
-function stableHash(obj) {
-  try {
-    const sorted = {};
-    Object.keys(obj || {})
-      .sort()
-      .forEach((k) => {
-        sorted[k] = obj[k];
-      });
-    return JSON.stringify(sorted);
-  } catch {
-    return String(obj);
-  }
-}
-
 function base64ToObjectUrl(base64) {
   if (!base64) return null;
   const binary = typeof atob !== "undefined" ? atob(base64) : "";
@@ -38,7 +24,6 @@ function GLBModel({ url }) {
     const root = groupRef.current;
     if (!root) return;
 
-    // Fit to a reasonable display size.
     const box = new THREE.Box3().setFromObject(root);
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
@@ -61,17 +46,47 @@ function GLBModel({ url }) {
   return <primitive ref={groupRef} object={gltf.scene} />;
 }
 
-export default function ProceduralGLBModel({ topic, simType, params = {} }) {
+function RenderWorkerHelp({ error }) {
+  return (
+    <Html center>
+      <div className="bg-slate-900/95 px-5 py-4 rounded-xl border border-amber-500/35 text-left max-w-[400px] backdrop-blur-sm shadow-xl">
+        <p className="text-sm font-semibold text-amber-300 mb-1">High-quality CAD path unavailable</p>
+        <p className="text-xs text-white/55 leading-relaxed mb-3">
+          {error || "The render worker is not running."}
+          {" "}
+          High Quality builds real GLB meshes via Blender + OpenSCAD — not Three.js boxes.
+        </p>
+        <p className="text-[11px] text-white/40 mb-2">Fix:</p>
+        <p className="text-[11px] font-mono text-emerald-300/90 bg-black/40 rounded-lg px-3 py-2 leading-relaxed">
+          Stop the dev server (Ctrl+C), then:<br />
+          pnpm dev
+        </p>
+        <p className="text-[10px] text-white/35 mt-2">
+          That starts Next.js and the CAD worker together. Then refresh this page.
+          Use <span className="text-amber-300">Fast</span> mode for a quick Three.js preview without CAD.
+        </p>
+      </div>
+    </Html>
+  );
+}
+
+export default function ProceduralGLBModel({
+  topic,
+  simType,
+  params = {},
+  specSheet = null,
+  reloadToken = 0,
+}) {
   const cacheRef = useRef(new Map());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [objectUrl, setObjectUrl] = useState(null);
+  const [meta, setMeta] = useState(null);
 
-  // Only regenerate when the TOPIC changes — physics params (pressure, speed, etc.)
-  // don't affect the model geometry. Re-generating on every slider drag wastes 30s.
   const reqKey = useMemo(() => {
-    return `${String(topic || simType || "")}::${String(simType || "")}`;
-  }, [topic, simType]);
+    const specId = specSheet?.referenceProduct || "";
+    return `${String(topic || simType || "")}::${String(simType || "")}::${specId}::${reloadToken}`;
+  }, [topic, simType, specSheet?.referenceProduct, reloadToken]);
 
   useEffect(() => {
     let cancelled = false;
@@ -80,25 +95,34 @@ export default function ProceduralGLBModel({ topic, simType, params = {} }) {
     async function run() {
       setError(null);
       setLoading(true);
+      setObjectUrl(null);
 
       const cached = cacheRef.current.get(reqKey);
       if (cached?.glbBase64) {
         const url = base64ToObjectUrl(cached.glbBase64);
         prevUrl = url;
-        if (!cancelled) setObjectUrl(url);
+        if (!cancelled) {
+          setObjectUrl(url);
+          setMeta(cached);
+        }
         setLoading(false);
         return;
       }
 
-      // Debounce-ish: callers will re-render rapidly; keep this component
-      // from spamming the worker.
-      await new Promise((r) => setTimeout(r, 250));
+      await new Promise((r) => setTimeout(r, 200));
       if (cancelled) return;
 
+      // The route looks up the shared model library first and only researches a
+      // spec sheet on a miss, so asking for one here would defeat the cache.
       const res = await fetch("/api/geometry-render", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic: topic || simType, simType, params }),
+        body: JSON.stringify({
+          topic: topic || simType,
+          simType,
+          params,
+          specSheet: specSheet?.dimensions?.length ? specSheet : null,
+        }),
       });
 
       const data = await res.json();
@@ -107,10 +131,12 @@ export default function ProceduralGLBModel({ topic, simType, params = {} }) {
       }
 
       cacheRef.current.set(reqKey, data);
-
       const url = base64ToObjectUrl(data.glbBase64);
       prevUrl = url;
-      if (!cancelled) setObjectUrl(url);
+      if (!cancelled) {
+        setObjectUrl(url);
+        setMeta(data);
+      }
       setLoading(false);
     }
 
@@ -124,20 +150,12 @@ export default function ProceduralGLBModel({ topic, simType, params = {} }) {
       cancelled = true;
       if (prevUrl) URL.revokeObjectURL(prevUrl);
     };
-  }, [reqKey]);
+  }, [reqKey, topic, simType, params, specSheet]);
 
   if (error) {
     return (
       <group>
-        <mesh>
-          <icosahedronGeometry args={[1.2, 1]} />
-          <meshStandardMaterial color="#ef4444" wireframe />
-        </mesh>
-        <Html center>
-          <div className="bg-slate-900/95 px-4 py-3 rounded-xl border border-red-500/30 text-center max-w-[320px]">
-            <p className="text-sm text-red-400">{error}</p>
-          </div>
-        </Html>
+        <RenderWorkerHelp error={error} />
       </group>
     );
   }
@@ -147,12 +165,13 @@ export default function ProceduralGLBModel({ topic, simType, params = {} }) {
       <group position={[0, 1.5, 0]}>
         <mesh>
           <icosahedronGeometry args={[1.0, 1]} />
-          <meshStandardMaterial color="#10b981" wireframe opacity={0.7} />
+          <meshStandardMaterial color="#10b981" wireframe opacity={0.7} transparent />
         </mesh>
         <Html center>
-          <div className="bg-slate-900/95 px-4 py-3 rounded-xl border border-emerald-500/25 text-center backdrop-blur-sm">
-            <p className="text-sm text-emerald-400">Rebuilding 3D geometry…</p>
-            <p className="text-xs text-white/40 mt-1">{topic || simType}</p>
+          <div className="bg-slate-900/95 px-4 py-3 rounded-xl border border-emerald-500/25 text-center backdrop-blur-sm max-w-[300px]">
+            <p className="text-sm text-emerald-400 font-medium">Building CAD geometry…</p>
+            <p className="text-xs text-white/45 mt-1">{specSheet?.referenceProduct || topic || simType}</p>
+            <p className="text-[10px] text-white/30 mt-1">Blender / OpenSCAD → GLB</p>
           </div>
         </Html>
       </group>
@@ -167,4 +186,3 @@ export default function ProceduralGLBModel({ topic, simType, params = {} }) {
     </Suspense>
   );
 }
-

@@ -63,11 +63,12 @@ function Loader() {
   );
 }
 
-function SceneContent({ simType, params, simConfig, topic, sceneCode, onRegenerate, agentSteps }) {
-  // "pendulum" also maps to Newton's Cradle for a richer multi-ball experience
+function SceneContent({ simType, params, simConfig, topic, sceneCode, quality, specSheet, geometryReload, onRegenerate, agentSteps }) {
   const isNewtonsCradle = simType === "newton_cradle" || simType === "pendulum";
   const isKnown = KNOWN_TYPES.includes(simType) || isNewtonsCradle;
   const showGround = simType !== "orbit";
+  // High Quality (thinking) → CAD/GLB via Blender/OpenSCAD. Fast → R3F JSX blocks.
+  const useCadPath = quality !== "fast";
 
   return (
     <>
@@ -103,17 +104,46 @@ function SceneContent({ simType, params, simConfig, topic, sceneCode, onRegenera
       {simType === "f1_car"                    && <PhysicsF1Car          params={params} simConfig={simConfig} />}
       {simType === "steam_engine"              && <PhysicsSteamEngine    params={params} simConfig={simConfig} />}
 
-      {/* airplane → HighQualityModel (AI-generated geometry is fine for this) */}
-      {simType === "airplane"                  && <HighQualityModel topic={topic || "airplane"} context="" />}
+      {/* airplane: High Quality → CAD GLB; Fast → lightweight AI parts */}
+      {simType === "airplane" && (
+        useCadPath
+          ? (
+            <ProceduralGLBModel
+              topic={topic || "airplane"}
+              simType={simType}
+              params={params}
+              specSheet={specSheet}
+              reloadToken={geometryReload}
+            />
+          )
+          : <HighQualityModel topic={topic || "airplane"} context="" />
+      )}
 
-      {/* Unrecognized topic: prefer AI-generated R3F component (reactive, animated),
-          fall back to procedural GLB if no code has been generated yet. */}
+      {/* Unrecognized topic: High Quality → procedural GLB (Blender/OpenSCAD).
+          Fast → AI-generated R3F component. */}
       {!isKnown && simType && simType !== "robot_arm" && simType !== "airplane" && (
-        sceneCode
-          ? <DynamicPhysicsScene code={sceneCode} params={params} simConfig={simConfig} topic={topic} onRegenerate={onRegenerate} agentSteps={agentSteps} />
-          : (agentSteps?.length
-            ? <DynamicPhysicsScene code={null} params={params} simConfig={simConfig} topic={topic} onRegenerate={onRegenerate} agentSteps={agentSteps} />
-            : <ProceduralGLBModel topic={topic || simType} simType={simType} params={params} />)
+        useCadPath
+          ? (
+            <ProceduralGLBModel
+              topic={topic || simType}
+              simType={simType}
+              params={params}
+              specSheet={specSheet}
+              reloadToken={geometryReload}
+            />
+          )
+          : sceneCode
+            ? <DynamicPhysicsScene code={sceneCode} params={params} simConfig={simConfig} topic={topic} onRegenerate={onRegenerate} agentSteps={agentSteps} />
+            : (
+              <DynamicPhysicsScene
+                code={null}
+                params={params}
+                simConfig={simConfig}
+                topic={topic}
+                onRegenerate={onRegenerate}
+                agentSteps={agentSteps}
+              />
+            )
       )}
 
       {showGround && isKnown && (
@@ -123,7 +153,7 @@ function SceneContent({ simType, params, simConfig, topic, sceneCode, onRegenera
   );
 }
 
-export default function PhysicsScene({ simType, params, simConfig, topic, sceneCode, onRegenerate, agentSteps }) {
+export default function PhysicsScene({ simType, params, simConfig, topic, sceneCode, quality, specSheet, geometryReload, onRegenerate, agentSteps }) {
   const cfg = SCENE_CONFIGS[simType] || SCENE_CONFIGS.custom;
 
   if (!simType) {
@@ -148,7 +178,7 @@ export default function PhysicsScene({ simType, params, simConfig, topic, sceneC
       gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.2 }}
     >
       <Suspense fallback={<Loader />}>
-        <SceneContent simType={simType} params={params} simConfig={simConfig} topic={topic} sceneCode={sceneCode} onRegenerate={onRegenerate} agentSteps={agentSteps} />
+        <SceneContent simType={simType} params={params} simConfig={simConfig} topic={topic} sceneCode={sceneCode} quality={quality} specSheet={specSheet} geometryReload={geometryReload} onRegenerate={onRegenerate} agentSteps={agentSteps} />
         <OrbitControls
           makeDefault
           minDistance={0.5}

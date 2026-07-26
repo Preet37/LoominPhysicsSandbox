@@ -2,9 +2,16 @@ import Groq from 'groq-sdk';
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY || 'missing_groq_key' });
 
-const NVIDIA_BASE    = 'https://integrate.api.nvidia.com/v1';
-const NVIDIA_THINKING = 'meta/llama-3.1-405b-instruct';
-const NVIDIA_FAST     = 'nvidia/llama-3.1-nemotron-nano-8b-v1';
+import {
+  NVIDIA_BASE,
+  NVIDIA_THINKING,
+  NVIDIA_FAST,
+  NVIDIA_NO_THINKING,
+  assertLiveModels,
+} from '@/lib/models';
+
+assertLiveModels('sim-notes', [NVIDIA_THINKING, NVIDIA_FAST]);
+
 const GROQ_THINKING   = 'llama-3.3-70b-versatile';
 const GROQ_FAST       = 'llama-3.1-8b-instant';
 
@@ -137,7 +144,10 @@ async function* nvidiaStream(messages: object[], model: string, maxTokens: numbe
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${process.env.NVIDIA_API_KEY}`,
     },
-    body: JSON.stringify({ model, messages, temperature: 0.45, max_tokens: maxTokens, stream: true }),
+    body: JSON.stringify({
+      model, messages, temperature: 0.45, max_tokens: maxTokens, stream: true,
+      chat_template_kwargs: NVIDIA_NO_THINKING,
+    }),
   });
 
   if (!res.ok) throw new Error(`NVIDIA API ${res.status}: ${await res.text()}`);

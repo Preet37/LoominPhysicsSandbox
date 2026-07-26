@@ -640,7 +640,7 @@ export function retrievePhysicsKnowledge(topic: string): PhysicsEntry | null {
   let bestScore = 0;
   for (const [key, entry] of Object.entries(PHYSICS_KB)) {
     const score = entry.keywords.filter((kw) => {
-      if (!t.includes(kw)) return false;
+      if (!matchesKeyword(t, kw)) return false;
       if (entry.simType === "newton_cradle" && kw === "pendulum" && /\b(inverted|inverse)\s+pendulum\b/.test(t))
         return false;
       return true;
@@ -648,6 +648,22 @@ export function retrievePhysicsKnowledge(topic: string): PhysicsEntry | null {
     if (score > bestScore) { bestScore = score; bestKey = key; }
   }
   return bestScore > 0 ? PHYSICS_KB[bestKey] : null;
+}
+
+/**
+ * Whole-word keyword match.
+ *
+ * This used to be a bare `topic.includes(keyword)`, which matched across word
+ * interiors: "brewing" and "sewing" both contain "wing", so "espresso machine
+ * brewing pressure" and "sewing machine" were both classified as aircraft and
+ * given aerodynamics notes. Anchoring to word boundaries fixes that whole class
+ * of misclassification.
+ */
+function matchesKeyword(topic: string, keyword: string): boolean {
+  const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Keywords may be multi-word ("wind power"); allow flexible whitespace.
+  const pattern = escaped.replace(/\s+/g, "\\s+");
+  return new RegExp(`\\b${pattern}\\b`, "i").test(topic);
 }
 
 // Classify sim type from topic string (deterministic, no AI needed)
