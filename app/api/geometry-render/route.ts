@@ -5,7 +5,7 @@ import { researchSpecSheet } from "@/lib/specSheet";
 import type { SpecSheet } from "@/lib/specSheet";
 import { planToOpenScad, researchGeometryPlan } from "@/lib/geometryPlan";
 import { lookupModel, saveModel } from "@/lib/modelLibrary";
-import { ensureRenderWorker, resolveRenderWorkerUrl } from "@/lib/ensureRenderWorker";
+import { ensureRenderWorker, resolveRenderWorkerUrl, workerUnavailableMessage } from "@/lib/ensureRenderWorker";
 
 // Headless geometry render pipeline
 // Blender 3.4 (Debian): read_factory_settings(use_empty=True) clears ALL addons —
@@ -857,7 +857,7 @@ export async function GET() {
     workerUrl,
     hint: ok
       ? "Render worker reachable"
-      : "CAD worker not running. Restart with: pnpm dev (starts worker automatically)",
+      : workerUnavailableMessage(),
   });
 }
 
@@ -907,8 +907,7 @@ export async function POST(req: Request) {
       return NextResponse.json(
         {
           success: false,
-          error:
-            "Render worker is not running. Stop the dev server and run `pnpm dev` once — it starts the CAD worker automatically.",
+          error: workerUnavailableMessage(),
         },
         { status: 503 },
       );

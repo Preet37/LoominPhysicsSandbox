@@ -19,6 +19,25 @@ export function resolveRenderWorkerUrl(): string {
   return process.env.RENDER_WORKER_URL || DEFAULT_RENDER_WORKER_URL;
 }
 
+/** True when a non-localhost worker URL is configured (required for Vercel/production). */
+export function isRemoteWorkerConfigured(): boolean {
+  const url = process.env.RENDER_WORKER_URL || "";
+  if (!url) return false;
+  return !url.includes("127.0.0.1") && !url.includes("localhost");
+}
+
+/** Serverless hosts (Vercel) cannot run Blender/OpenSCAD — only a remote worker works. */
+export function isServerlessDeployment(): boolean {
+  return !!process.env.VERCEL || process.env.NODE_ENV === "production";
+}
+
+export function workerUnavailableMessage(): string {
+  if (isServerlessDeployment() && !isRemoteWorkerConfigured()) {
+    return "High-quality CAD needs a hosted render worker on this deployment. Switch to Fast mode for a Three.js preview, or set RENDER_WORKER_URL in Vercel to a Railway/Fly worker running render-worker/.";
+  }
+  return "Render worker is not running. Run `pnpm dev` locally — it starts the CAD worker automatically.";
+}
+
 let spawnInFlight: Promise<boolean> | null = null;
 
 async function pingOnce(timeoutMs: number): Promise<boolean> {
@@ -104,6 +123,8 @@ async function spawnWorkerOnce(): Promise<boolean> {
 /** Ensure the local render worker is reachable (used by /api/geometry-render). */
 export async function ensureRenderWorker(): Promise<boolean> {
   if (await pingWorker()) return true;
+  // Vercel cannot spawn Blender/OpenSCAD — skip the 12s spawn wait when no remote URL is set.
+  if (isServerlessDeployment() && !isRemoteWorkerConfigured()) return false;
   if (!spawnInFlight) {
     spawnInFlight = spawnWorkerOnce().finally(() => {
       spawnInFlight = null;

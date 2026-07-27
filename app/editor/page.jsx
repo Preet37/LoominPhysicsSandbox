@@ -469,6 +469,12 @@ export default function PhysicsEditorPage() {
     }
   }, [activeTopic, simConfig, vars, quality, generateSceneCode, setSceneCode]);
 
+  /** Vercel has no local CAD worker — generate R3F scene code as fallback. */
+  const handleCadUnavailable = useCallback(() => {
+    if (!activeTopic || sceneCode) return;
+    generateSceneCode(activeTopic, simConfig?.simType || "custom", vars, null);
+  }, [activeTopic, simConfig, vars, sceneCode, generateSceneCode]);
+
   const handleAutoFix = useCallback(() => {
     if (!simConfig) return;
     const newText = buildAutoFixText(editorValue, simConfig, vars);
@@ -925,6 +931,7 @@ export default function PhysicsEditorPage() {
                       specSheet={specSheet}
                       geometryReload={geometryReload}
                       onRegenerate={handleRegenerate}
+                      onCadUnavailable={handleCadUnavailable}
                       agentSteps={agentSteps}
                     />
                     <AnimatePresence mode="wait">

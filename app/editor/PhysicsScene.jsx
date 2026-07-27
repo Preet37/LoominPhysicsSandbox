@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, ContactShadows, Html } from "@react-three/drei";
 import * as THREE from "three";
@@ -63,12 +63,52 @@ function Loader() {
   );
 }
 
-function SceneContent({ simType, params, simConfig, topic, sceneCode, quality, specSheet, geometryReload, onRegenerate, agentSteps }) {
+function CadFallbackBanner() {
+  return (
+    <Html position={[0, 2.8, 0]}>
+      <div className="bg-slate-900/90 px-3 py-2 rounded-lg border border-amber-500/25 text-center max-w-[320px] backdrop-blur-sm pointer-events-none">
+        <p className="text-[11px] text-amber-300/90 font-medium">CAD worker not on this host</p>
+        <p className="text-[10px] text-white/40 mt-0.5">Showing Fast preview instead</p>
+      </div>
+    </Html>
+  );
+}
+
+function SceneContent({ simType, params, simConfig, topic, sceneCode, quality, specSheet, geometryReload, onRegenerate, onCadUnavailable, agentSteps }) {
   const isNewtonsCradle = simType === "newton_cradle" || simType === "pendulum";
   const isKnown = KNOWN_TYPES.includes(simType) || isNewtonsCradle;
   const showGround = simType !== "orbit";
   // High Quality (thinking) → CAD/GLB via Blender/OpenSCAD. Fast → R3F JSX blocks.
-  const useCadPath = quality !== "fast";
+  const wantsCad = quality !== "fast";
+  const [cadReady, setCadReady] = useState(wantsCad ? null : true);
+
+  useEffect(() => {
+    if (!wantsCad) {
+      setCadReady(true);
+      return;
+    }
+    let cancelled = false;
+    fetch("/api/geometry-render")
+      .then((r) => r.json())
+      .then((d) => {
+        if (!cancelled) setCadReady(!!d.ok);
+      })
+      .catch(() => {
+        if (!cancelled) setCadReady(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [wantsCad]);
+
+  useEffect(() => {
+    if (cadReady === false && onCadUnavailable) {
+      onCadUnavailable();
+    }
+  }, [cadReady, onCadUnavailable]);
+
+  const useCadPath = wantsCad && cadReady === true;
+  const cadFallback = wantsCad && cadReady === false;
 
   return (
     <>
@@ -104,23 +144,27 @@ function SceneContent({ simType, params, simConfig, topic, sceneCode, quality, s
       {simType === "f1_car"                    && <PhysicsF1Car          params={params} simConfig={simConfig} />}
       {simType === "steam_engine"              && <PhysicsSteamEngine    params={params} simConfig={simConfig} />}
 
-      {/* airplane: High Quality → CAD GLB; Fast → lightweight AI parts */}
+      {cadFallback && <CadFallbackBanner />}
+
+      {/* airplane: High Quality → CAD GLB; Fast (or CAD unavailable) → lightweight AI parts */}
       {simType === "airplane" && (
-        useCadPath
-          ? (
-            <ProceduralGLBModel
-              topic={topic || "airplane"}
-              simType={simType}
-              params={params}
-              specSheet={specSheet}
-              reloadToken={geometryReload}
-            />
-          )
-          : <HighQualityModel topic={topic || "airplane"} context="" />
+        wantsCad && cadReady === null
+          ? <Loader />
+          : useCadPath
+            ? (
+              <ProceduralGLBModel
+                topic={topic || "airplane"}
+                simType={simType}
+                params={params}
+                specSheet={specSheet}
+                reloadToken={geometryReload}
+              />
+            )
+            : <HighQualityModel topic={topic || "airplane"} context="" />
       )}
 
       {/* Unrecognized topic: High Quality → procedural GLB (Blender/OpenSCAD).
-          Fast → AI-generated R3F component. */}
+          Fast (or CAD unavailable) → AI-generated R3F component. */}
       {!isKnown && simType && simType !== "robot_arm" && simType !== "airplane" && (
         useCadPath
           ? (
@@ -146,6 +190,10 @@ function SceneContent({ simType, params, simConfig, topic, sceneCode, quality, s
             )
       )}
 
+      {wantsCad && cadReady === null && !isKnown && simType !== "robot_arm" && (
+        <Loader />
+      )}
+
       {showGround && isKnown && (
         <ContactShadows position={[0, 0, 0]} opacity={0.45} scale={18} blur={2} far={8} resolution={512} />
       )}
@@ -153,7 +201,7 @@ function SceneContent({ simType, params, simConfig, topic, sceneCode, quality, s
   );
 }
 
-export default function PhysicsScene({ simType, params, simConfig, topic, sceneCode, quality, specSheet, geometryReload, onRegenerate, agentSteps }) {
+export default function PhysicsScene({ simType, params, simConfig, topic, sceneCode, quality, specSheet, geometryReload, onRegenerate, onCadUnavailable, agentSteps }) {
   const cfg = SCENE_CONFIGS[simType] || SCENE_CONFIGS.custom;
 
   if (!simType) {
@@ -178,7 +226,7 @@ export default function PhysicsScene({ simType, params, simConfig, topic, sceneC
       gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.2 }}
     >
       <Suspense fallback={<Loader />}>
-        <SceneContent simType={simType} params={params} simConfig={simConfig} topic={topic} sceneCode={sceneCode} quality={quality} specSheet={specSheet} geometryReload={geometryReload} onRegenerate={onRegenerate} agentSteps={agentSteps} />
+        <SceneContent simType={simType} params={params} simConfig={simConfig} topic={topic} sceneCode={sceneCode} quality={quality} specSheet={specSheet} geometryReload={geometryReload} onRegenerate={onRegenerate} onCadUnavailable={onCadUnavailable} agentSteps={agentSteps} />
         <OrbitControls
           makeDefault
           minDistance={0.5}

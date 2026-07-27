@@ -47,7 +47,8 @@ function GLBModel({ url }) {
 }
 
 function RenderWorkerHelp({ error, onRetry }) {
-  const workerDown = /worker/i.test(error || "");
+  const workerDown = /worker|CAD|render worker/i.test(error || "");
+  const isProductionHint = /RENDER_WORKER_URL|hosted|deployment|Vercel/i.test(error || "");
   return (
     <Html center>
       <div className="bg-slate-900/95 px-5 py-4 rounded-xl border border-amber-500/35 text-left max-w-[400px] backdrop-blur-sm shadow-xl">
@@ -69,7 +70,7 @@ function RenderWorkerHelp({ error, onRetry }) {
             or switch to <span className="text-amber-300">Fast</span> mode for a quick preview.
           </span>
         </div>
-        {workerDown && (
+        {workerDown && !isProductionHint && (
           <p className="text-[10px] text-white/30 mt-3">
             Still failing? Restart once with <span className="font-mono text-emerald-300/80">pnpm dev</span> — it launches the CAD worker automatically.
           </p>
