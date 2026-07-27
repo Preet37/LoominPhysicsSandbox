@@ -7,6 +7,9 @@ import { planToOpenScad, researchGeometryPlan } from "@/lib/geometryPlan";
 import { lookupModel, saveModel } from "@/lib/modelLibrary";
 import { ensureRenderWorker, resolveRenderWorkerUrl, workerUnavailableMessage } from "@/lib/ensureRenderWorker";
 
+// Remote CAD renders (OpenSCAD → Blender) can take ~50s on a cold topic.
+export const maxDuration = 60;
+
 // Headless geometry render pipeline
 // Blender 3.4 (Debian): read_factory_settings(use_empty=True) clears ALL addons —
 // io_scene_gltf2 must be re-enabled explicitly.
