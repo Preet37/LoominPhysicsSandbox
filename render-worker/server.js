@@ -12,8 +12,18 @@ app.use(express.json({ limit: "10mb" }));
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8787;
 
-function base64File(p) {
-  return fs.readFileSync(p).toString("base64");
+/**
+ * Reads happen inside a serialized render, so a synchronous readFileSync of a
+ * multi-hundred-KB GLB blocks the event loop long enough to make a concurrent
+ * /health ping time out. Reading async keeps the worker responsive mid-render.
+ */
+async function readBase64IfPresent(p) {
+  try {
+    const buf = await fs.promises.readFile(p);
+    return buf.length > 0 ? buf.toString("base64") : "";
+  } catch {
+    return "";
+  }
 }
 
 function writeFile(p, content) {
@@ -104,10 +114,8 @@ async function renderWithBlenderScript({ scriptSource, screenshot }) {
     blend.stderr = blendError;
   }
 
-  const glbBase64 =
-    fs.existsSync(outGlb) && fs.statSync(outGlb).size > 0 ? base64File(outGlb) : "";
-  const thumbnailBase64 =
-    fs.existsSync(outPng) && fs.statSync(outPng).size > 0 ? base64File(outPng) : "";
+  const glbBase64 = await readBase64IfPresent(outGlb);
+  const thumbnailBase64 = await readBase64IfPresent(outPng);
 
   if (!glbBase64 || glbBase64.length < MIN_GLB_B64) {
     const hint = blendError
@@ -299,10 +307,8 @@ else:
     blend.stderr = blendErr;
   }
 
-  const glbBase64 =
-    fs.existsSync(outGlb) && fs.statSync(outGlb).size > 0 ? base64File(outGlb) : "";
-  const thumbnailBase64 =
-    fs.existsSync(outPng) && fs.statSync(outPng).size > 0 ? base64File(outPng) : "";
+  const glbBase64 = await readBase64IfPresent(outGlb);
+  const thumbnailBase64 = await readBase64IfPresent(outPng);
 
   if (!glbBase64 || glbBase64.length < MIN_GLB_B64) {
     cleanup(tmpDir);

@@ -1,5 +1,6 @@
 import { spawn } from "child_process";
 import fs from "fs";
+import os from "os";
 import path from "path";
 
 export const DEFAULT_RENDER_WORKER_URL = "http://127.0.0.1:8787/render";
@@ -20,14 +21,29 @@ export function resolveRenderWorkerUrl(): string {
 
 let spawnInFlight: Promise<boolean> | null = null;
 
-async function pingWorker(): Promise<boolean> {
+async function pingOnce(timeoutMs: number): Promise<boolean> {
   for (const url of workerHealthUrls()) {
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(2500) });
+      const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
       if (res.ok) return true;
     } catch {
-      /* try next */
+      /* try next url */
     }
+  }
+  return false;
+}
+
+/**
+ * A single ping used to decide the worker was dead, but a cold render blocks the
+ * worker's event loop for a beat while it reads/writes multi-hundred-KB files,
+ * so one timed-out ping meant a healthy worker got reported as down. Retry a few
+ * times with backoff before giving up.
+ */
+async function pingWorker(): Promise<boolean> {
+  const delaysMs = [0, 400, 900];
+  for (const delay of delaysMs) {
+    if (delay) await new Promise((r) => setTimeout(r, delay));
+    if (await pingOnce(4000)) return true;
   }
   return false;
 }
@@ -52,11 +68,23 @@ async function spawnWorkerOnce(): Promise<boolean> {
   if (!fs.existsSync(nodeModules)) return false;
 
   try {
+    // Log to a file (not "ignore") so a crashing worker is diagnosable, and
+    // PIN the port: the worker reads process.env.PORT, and Next.js dev often has
+    // PORT set (e.g. 3000) in its environment, which would make the spawned
+    // worker bind the wrong port so the :8787 health check never passes.
+    const logPath = path.join(os.tmpdir(), "loomin-render-worker.log");
+    let out: number;
+    try {
+      out = fs.openSync(logPath, "a");
+    } catch {
+      out = 1;
+    }
+    const workerPort = new URL(resolveRenderWorkerUrl()).port || "8787";
     const child = spawn(process.execPath, [workerScript], {
       detached: true,
-      stdio: "ignore",
+      stdio: ["ignore", out, out],
       cwd: process.cwd(),
-      env: { ...process.env },
+      env: { ...process.env, PORT: workerPort },
     });
     child.unref();
   } catch {

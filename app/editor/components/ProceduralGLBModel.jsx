@@ -46,25 +46,34 @@ function GLBModel({ url }) {
   return <primitive ref={groupRef} object={gltf.scene} />;
 }
 
-function RenderWorkerHelp({ error }) {
+function RenderWorkerHelp({ error, onRetry }) {
+  const workerDown = /worker/i.test(error || "");
   return (
     <Html center>
       <div className="bg-slate-900/95 px-5 py-4 rounded-xl border border-amber-500/35 text-left max-w-[400px] backdrop-blur-sm shadow-xl">
-        <p className="text-sm font-semibold text-amber-300 mb-1">High-quality CAD path unavailable</p>
+        <p className="text-sm font-semibold text-amber-300 mb-1">
+          {workerDown ? "CAD render worker unreachable" : "Couldn't build this model"}
+        </p>
         <p className="text-xs text-white/55 leading-relaxed mb-3">
           {error || "The render worker is not running."}
-          {" "}
-          High Quality builds real GLB meshes via Blender + OpenSCAD — not Three.js boxes.
         </p>
-        <p className="text-[11px] text-white/40 mb-2">Fix:</p>
-        <p className="text-[11px] font-mono text-emerald-300/90 bg-black/40 rounded-lg px-3 py-2 leading-relaxed">
-          Stop the dev server (Ctrl+C), then:<br />
-          pnpm dev
-        </p>
-        <p className="text-[10px] text-white/35 mt-2">
-          That starts Next.js and the CAD worker together. Then refresh this page.
-          Use <span className="text-amber-300">Fast</span> mode for a quick Three.js preview without CAD.
-        </p>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onRetry}
+            className="px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30 text-emerald-300 text-xs font-medium transition"
+          >
+            Try again
+          </button>
+          <span className="text-[10px] text-white/35">
+            or switch to <span className="text-amber-300">Fast</span> mode for a quick preview.
+          </span>
+        </div>
+        {workerDown && (
+          <p className="text-[10px] text-white/30 mt-3">
+            Still failing? Restart once with <span className="font-mono text-emerald-300/80">pnpm dev</span> — it launches the CAD worker automatically.
+          </p>
+        )}
       </div>
     </Html>
   );
@@ -82,11 +91,12 @@ export default function ProceduralGLBModel({
   const [error, setError] = useState(null);
   const [objectUrl, setObjectUrl] = useState(null);
   const [meta, setMeta] = useState(null);
+  const [manualRetry, setManualRetry] = useState(0);
 
   const reqKey = useMemo(() => {
     const specId = specSheet?.referenceProduct || "";
-    return `${String(topic || simType || "")}::${String(simType || "")}::${specId}::${reloadToken}`;
-  }, [topic, simType, specSheet?.referenceProduct, reloadToken]);
+    return `${String(topic || simType || "")}::${String(simType || "")}::${specId}::${reloadToken}::${manualRetry}`;
+  }, [topic, simType, specSheet?.referenceProduct, reloadToken, manualRetry]);
 
   useEffect(() => {
     let cancelled = false;
@@ -114,21 +124,47 @@ export default function ProceduralGLBModel({
 
       // The route looks up the shared model library first and only researches a
       // spec sheet on a miss, so asking for one here would defeat the cache.
-      const res = await fetch("/api/geometry-render", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          topic: topic || simType,
-          simType,
-          params,
-          specSheet: specSheet?.dimensions?.length ? specSheet : null,
-        }),
+      const requestBody = JSON.stringify({
+        topic: topic || simType,
+        simType,
+        params,
+        specSheet: specSheet?.dimensions?.length ? specSheet : null,
       });
 
-      const data = await res.json();
-      if (!data?.success || !data?.glbBase64) {
-        throw new Error(data?.error || "Geometry render failed");
+      // The worker can be briefly unreachable while it warms up or finishes a
+      // cold render, so a 503 is worth retrying rather than immediately telling
+      // the user to restart everything.
+      let data = null;
+      let lastError = "Geometry render failed";
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (cancelled) return;
+        if (attempt > 0) await new Promise((r) => setTimeout(r, 1500 * attempt));
+
+        let res;
+        try {
+          res = await fetch("/api/geometry-render", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: requestBody,
+          });
+        } catch (e) {
+          lastError = e?.message || "Network error reaching the render worker";
+          continue;
+        }
+
+        const payload = await res.json().catch(() => null);
+        if (payload?.success && payload?.glbBase64) {
+          data = payload;
+          break;
+        }
+        lastError = payload?.error || `Render failed (HTTP ${res.status})`;
+        // A hard modelling error (bad geometry) won't fix itself on retry;
+        // only retry the transient "worker not reachable / not running" states.
+        if (res.status !== 503 && !/worker/i.test(lastError)) break;
       }
+
+      if (cancelled) return;
+      if (!data) throw new Error(lastError);
 
       cacheRef.current.set(reqKey, data);
       const url = base64ToObjectUrl(data.glbBase64);
@@ -155,7 +191,7 @@ export default function ProceduralGLBModel({
   if (error) {
     return (
       <group>
-        <RenderWorkerHelp error={error} />
+        <RenderWorkerHelp error={error} onRetry={() => setManualRetry((n) => n + 1)} />
       </group>
     );
   }
