@@ -17,6 +17,7 @@
 
 import crypto from "crypto";
 import fs from "fs";
+import os from "os";
 import path from "path";
 
 export interface ModelLibraryEntry {
@@ -47,8 +48,18 @@ interface LibraryIndex {
   rejections: Record<string, number>;
 }
 
-const LIBRARY_DIR =
-  process.env.MODEL_LIBRARY_DIR || path.join(process.cwd(), ".model-library");
+/**
+ * On Vercel the deployment directory is read-only, so writing the library under
+ * process.cwd() silently failed and every request re-rendered from scratch —
+ * the single most expensive bug in the pipeline. /tmp is writable there and
+ * survives for the life of a warm instance, so repeat topics stay instant.
+ */
+function defaultLibraryDir(): string {
+  if (process.env.VERCEL) return path.join(os.tmpdir(), "loomin-model-library");
+  return path.join(process.cwd(), ".model-library");
+}
+
+const LIBRARY_DIR = process.env.MODEL_LIBRARY_DIR || defaultLibraryDir();
 const INDEX_PATH = path.join(LIBRARY_DIR, "index.json");
 const MIN_GLB_B64 = 80;
 

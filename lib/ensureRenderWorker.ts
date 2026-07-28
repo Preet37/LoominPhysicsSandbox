@@ -31,9 +31,14 @@ export function isServerlessDeployment(): boolean {
   return !!process.env.VERCEL || process.env.NODE_ENV === "production";
 }
 
+/**
+ * Two audiences: the deployed app shows this to end users, where deployment
+ * instructions are noise, while locally it is read by whoever can actually fix
+ * it. Keep the actionable text on the side that can act on it.
+ */
 export function workerUnavailableMessage(): string {
   if (isServerlessDeployment() && !isRemoteWorkerConfigured()) {
-    return "High-quality CAD needs a hosted render worker on this deployment. Switch to Fast mode for a Three.js preview, or set RENDER_WORKER_URL in Vercel to a Railway/Fly worker running render-worker/.";
+    return "High-quality CAD is not available on this deployment — showing the realtime preview instead.";
   }
   return "Render worker is not running. Run `pnpm dev` locally — it starts the CAD worker automatically.";
 }

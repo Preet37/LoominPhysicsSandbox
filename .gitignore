@@ -9,3 +9,5 @@ build
 tsconfig.tsbuildinfo
 # Cached CAD models built by /api/geometry-render
 .model-library
+.vercel
+.env*

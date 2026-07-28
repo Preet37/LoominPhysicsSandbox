@@ -97,9 +97,16 @@ export async function POST(req: Request) {
     // Only use LLM for complex natural language (with caching)
     const cacheKey = notes.trim().substring(0, 500); // Limit cache key size
     
-    const cachedEntry = await prisma.simulationCache.findUnique({ where: { prompt: cacheKey } });
-    if (cachedEntry) {
-      return NextResponse.json(JSON.parse(cachedEntry.result));
+    // The SQLite file is bundled read-only on Vercel, so an unguarded read here
+    // threw and turned every uncached extraction into a 500. The cache is an
+    // optimisation — losing it must not lose the request.
+    try {
+      const cachedEntry = await prisma.simulationCache.findUnique({ where: { prompt: cacheKey } });
+      if (cachedEntry) {
+        return NextResponse.json(JSON.parse(cachedEntry.result));
+      }
+    } catch {
+      /* cache unavailable (read-only or missing DB) — fall through and generate */
     }
 
     const result = await generateNewSimulation(notes);

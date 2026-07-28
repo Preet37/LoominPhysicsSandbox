@@ -63,12 +63,18 @@ function Loader() {
   );
 }
 
+/**
+ * No CAD worker is deployed alongside the hosted app, so this fires on every
+ * High Quality render in production. A centred amber warning read as a crash
+ * even though the fallback scene renders correctly — it is a mode note, not an
+ * error, so it sits quietly out of the way instead of over the model.
+ */
 function CadFallbackBanner() {
   return (
-    <Html position={[0, 2.8, 0]}>
-      <div className="bg-slate-900/90 px-3 py-2 rounded-lg border border-amber-500/25 text-center max-w-[320px] backdrop-blur-sm pointer-events-none">
-        <p className="text-[11px] text-amber-300/90 font-medium">CAD worker not on this host</p>
-        <p className="text-[10px] text-white/40 mt-0.5">Showing Fast preview instead</p>
+    <Html position={[0, -2.4, 0]} center>
+      <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-900/70 border border-white/10 backdrop-blur-sm pointer-events-none whitespace-nowrap">
+        <span className="w-1.5 h-1.5 rounded-full bg-sky-400/70" />
+        <span className="text-[10px] text-white/50 font-medium">Realtime preview</span>
       </div>
     </Html>
   );
