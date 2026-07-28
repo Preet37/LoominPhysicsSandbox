@@ -49,8 +49,17 @@ export const RETIRED_NVIDIA_MODELS: readonly string[] = [
  * Nemotron reasoning traces are billed against max_tokens but arrive on
  * `reasoning_content`, which every SSE collector here discards — so leaving
  * thinking enabled truncates real output while making requests ~8x slower.
+ *
+ * This has to be spread into the request body, NOT passed as
+ * `chat_template_kwargs`. The nemotron-3 family rejects
+ * `chat_template_kwargs: { thinking: false }` by emitting an endless run of
+ * <unk> tokens instead of text — a silent corruption, since the response is
+ * still 200 and still streams. Verified against the live endpoint:
+ *   reasoning_effort:"none" → clean content, no reasoning_content
+ *   reasoning_effort:"low"  → content plus a discarded reasoning_content
+ *   chat_template_kwargs    → <unk> garbage
  */
-export const NVIDIA_NO_THINKING = { thinking: false } as const;
+export const NVIDIA_NO_THINKING = { reasoning_effort: "none" } as const;
 
 export function assertLiveModels(scope: string, models: readonly string[]): void {
   const dead = models.filter((m) => RETIRED_NVIDIA_MODELS.includes(m));

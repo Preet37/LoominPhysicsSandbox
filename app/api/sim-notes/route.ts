@@ -146,7 +146,7 @@ async function* nvidiaStream(messages: object[], model: string, maxTokens: numbe
     },
     body: JSON.stringify({
       model, messages, temperature: 0.45, max_tokens: maxTokens, stream: true,
-      chat_template_kwargs: NVIDIA_NO_THINKING,
+      ...NVIDIA_NO_THINKING,
     }),
   });
 

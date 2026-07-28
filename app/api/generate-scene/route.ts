@@ -1124,7 +1124,7 @@ async function streamOneNvidia(
       temperature: 0.25,
       max_tokens: maxTokens,
       stream: true,
-      chat_template_kwargs: NVIDIA_NO_THINKING,
+      ...NVIDIA_NO_THINKING,
     }),
   });
   if (!res.ok) {

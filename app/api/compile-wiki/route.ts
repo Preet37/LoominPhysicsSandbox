@@ -37,7 +37,7 @@ async function callLLM(system: string, user: string, maxTokens = 3000): Promise<
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.NVIDIA_API_KEY}` },
         body: JSON.stringify({
           model: NVIDIA_THINKING, messages, temperature: 0.4, max_tokens: maxTokens,
-          chat_template_kwargs: NVIDIA_NO_THINKING,
+          ...NVIDIA_NO_THINKING,
         }),
       });
       if (res.ok) {
