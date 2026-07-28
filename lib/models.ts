@@ -17,8 +17,8 @@ export const NVIDIA_BASE = "https://integrate.api.nvidia.com/v1";
  * timeout before the next candidate starts.
  */
 export const NVIDIA_CODE_CHAIN = [
-  "nvidia/nemotron-3-ultra-550b-a55b",
   "nvidia/nemotron-3-super-120b-a12b",
+  "nvidia/nemotron-3-nano-30b-a3b",
 ] as const;
 
 /** Best available model for long-form reasoning (wiki articles, notes, design). */
@@ -33,10 +33,16 @@ export const NVIDIA_FAST = "nvidia/llama-3.1-nemotron-nano-8b-v1";
  * - nvidia/llama-3.1-nemotron-ultra-253b-v1: appears in /v1/models but its
  *   backing function is undeployed, so real calls 404. Presence in the model
  *   listing is therefore not sufficient evidence that a model works.
+ * - nvidia/nemotron-3-ultra-550b-a55b: same trap, worse failure. Still listed in
+ *   /v1/models, but real calls never respond at all — no status, no error, the
+ *   socket just hangs until the caller's timeout fires. As the leader of
+ *   NVIDIA_CODE_CHAIN it made every High Quality request burn its full 90s and
+ *   then 500, which is what broke notes generation in production.
  */
 export const RETIRED_NVIDIA_MODELS: readonly string[] = [
   "meta/llama-3.1-405b-instruct",
   "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+  "nvidia/nemotron-3-ultra-550b-a55b",
 ];
 
 /**
