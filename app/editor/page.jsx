@@ -17,6 +17,7 @@ import AgentStatusBar from "./components/AgentStatusBar";
 import InteractiveNotesSurface from "./components/InteractiveNotesSurface";
 import ParamSliderPanel from "./components/ParamSliderPanel";
 import SpecSheetBadge from "./components/SpecSheetBadge";
+import GenerativeModelPanel from "./components/GenerativeModelPanel";
 import EquationsPanel from "./components/EquationsPanel";
 import GraphsPanel from "./components/GraphsPanel";
 import PythonPanel from "./components/PythonPanel";
@@ -468,6 +469,16 @@ export default function PhysicsEditorPage() {
       setGeometryReload((k) => k + 1);
     }
   }, [activeTopic, simConfig, vars, quality, generateSceneCode, setSceneCode]);
+
+  /**
+   * A generated mesh is saved into the same topic-keyed library that
+   * /api/geometry-render consults before doing any work, so the scene only needs
+   * to be told to re-fetch — the new model arrives through the existing path
+   * rather than a second GLB channel.
+   */
+  const handleGeneratedMesh = useCallback(() => {
+    setGeometryReload((k) => k + 1);
+  }, []);
 
   /** Vercel has no local CAD worker — generate R3F scene code as fallback. */
   const handleCadUnavailable = useCallback(() => {
@@ -938,6 +949,13 @@ export default function PhysicsEditorPage() {
                       <StatusCard key={physicsState.state} physicsState={physicsState} onAutoFix={handleAutoFix} />
                     </AnimatePresence>
                   </div>
+
+                  {/* Photoreal path — self-hides unless FAL_KEY is configured server-side */}
+                  <GenerativeModelPanel
+                    topic={activeTopic}
+                    specSheet={specSheet?.spec ?? null}
+                    onMeshReady={handleGeneratedMesh}
+                  />
 
                   {/* Param sliders — separate row below canvas, scrollable if many params */}
                   {(simConfig?.params?.length > 0) && (
