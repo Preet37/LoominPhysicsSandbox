@@ -100,7 +100,8 @@ export default function Tripo3DModel({ topic, onFallback }) {
         <GLBModel url={modelData.modelUrl} />
       </Suspense>
       
-      <Html position={[0, -3.6, 0]} center>
+      {/* Bottom-left, clear of the force vectors that converge below the body. */}
+      <Html position={[-5.0, -3.5, 0]} zIndexRange={[30, 20]}>
         <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-900/85 border border-emerald-500/25 backdrop-blur-sm whitespace-nowrap">
           <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
           <span className="text-[10px] text-emerald-400/90 uppercase tracking-widest font-medium">Photoreal</span>

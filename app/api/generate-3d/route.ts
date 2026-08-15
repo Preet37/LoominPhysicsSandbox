@@ -34,13 +34,18 @@ export async function POST(req: Request) {
       });
     }
 
-    // Keyed on the bare topic, not the decorated prompt, so the library is
-    // shared with every other generator and survives prompt-wording changes.
     const libraryTopic = (topic || prompt || '').trim();
+
+    // Namespaced per generator. The library is shared with the CAD pipeline, and
+    // an unprefixed key meant Photoreal silently served the OpenSCAD mesh for
+    // any topic CAD had already built — the exact opposite of what was asked
+    // for. Keyed on the bare topic rather than the decorated prompt so wording
+    // changes to the prompt do not orphan the stored model.
+    const libraryKey = `photoreal ${libraryTopic}`;
 
     // The on-disk library is the real cache: it outlives restarts, so a model
     // is paid for exactly once ever rather than once per process.
-    const stored = lookupModel(libraryTopic);
+    const stored = lookupModel(libraryKey);
     if (stored) {
       return NextResponse.json({
         success: true,
@@ -150,7 +155,7 @@ export async function POST(req: Request) {
             if (glbRes.ok) {
               const glbBase64 = Buffer.from(await glbRes.arrayBuffer()).toString('base64');
               saveModel({
-                topic: libraryTopic,
+                topic: libraryKey,
                 glbBase64,
                 thumbnailBase64: null,
                 generator: 'photoreal',
