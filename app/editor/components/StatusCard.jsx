@@ -17,8 +17,11 @@ function splitExplanation(text) {
 }
 
 export default function StatusCard({ physicsState, onAutoFix }) {
-  const { state, explanation } = physicsState;
+  const { state, explanation, technical } = physicsState;
   const [expanded, setExpanded] = useState(true);
+  // Collapsed by default: the plain explanation is the lesson, the symbols are
+  // reference material for whoever wants to check the reasoning.
+  const [showPhysics, setShowPhysics] = useState(false);
 
   if (state === "OPTIMAL") {
     return (
@@ -75,11 +78,32 @@ export default function StatusCard({ physicsState, onAutoFix }) {
             </div>
           )}
 
-          {/* Physics chain explanation — broken into natural paragraphs */}
+          {/* Plain-language explanation — broken into natural paragraphs */}
           {body && (
             <div className={`text-[11px] ${color.body} leading-relaxed space-y-2`}>
               {body.split(/(?<=\.)\s+(?=[A-Z])/).map((sentence, i) => (
                 <p key={i}>{sentence}</p>
+              ))}
+            </div>
+          )}
+
+        </div>
+      )}
+
+      {/* Outside the scroll container: inside it the toggle sat below the fold
+          and could not be clicked without scrolling to a boundary. */}
+      {expanded && technical && (
+        <div className="px-3.5 pb-1 pt-1.5 border-t border-white/10">
+          <button
+            onClick={() => setShowPhysics((x) => !x)}
+            className={`text-[10px] font-mono uppercase tracking-wider ${color.tag} opacity-70 hover:opacity-100 transition`}
+          >
+            {showPhysics ? "Hide the physics" : "Show the physics"}
+          </button>
+          {showPhysics && (
+            <div className={`mt-2 mb-1 max-h-[150px] overflow-y-auto loomin-scroll text-[10px] font-mono ${color.body} opacity-80 leading-relaxed space-y-1.5`}>
+              {technical.split("\n").map((line, i) => (
+                <p key={i}>{line}</p>
               ))}
             </div>
           )}

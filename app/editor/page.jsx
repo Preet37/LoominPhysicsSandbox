@@ -95,13 +95,35 @@ function parseSIMCONFIG(text) {
   return null;
 }
 
-/** Picks the equation from the knowledge base that actually governs this parameter. */
-function governingEquation(simType, paramName) {
+/**
+ * Picks the equation that actually governs this failure.
+ *
+ * The research text is the better signal than the parameter name: matching on
+ * the name alone picked the tip-speed/RPM relation for a wind-speed limit,
+ * because "tip-speed" contains "speed", when the failure is blade stress. So
+ * score against the researched explanation first and only fall back to the
+ * name. No fallback to equations[0] — citing a law that does not govern the
+ * failure is worse than citing none.
+ */
+function governingEquation(simType, paramName, researchText) {
   const entry = PHYSICS_KB?.[simType];
   if (!entry?.equations?.length) return null;
+
+  const symbols = String(researchText || "")
+    .toLowerCase()
+    .match(/[a-zσλρω]+\s*[=∝]|[a-z]²|[a-z]³/g);
+
+  if (symbols?.length) {
+    const scored = entry.equations
+      .map((eq) => ({
+        eq,
+        score: symbols.filter((sym) => eq.toLowerCase().includes(sym.replace(/\s+/g, ""))).length,
+      }))
+      .sort((a, b) => b.score - a.score);
+    if (scored[0]?.score > 0) return scored[0].eq;
+  }
+
   const tokens = String(paramName).toLowerCase().split(/[_\s-]+/).filter((t) => t.length > 2);
-  // No fallback to equations[0]: naming a law that does not actually govern this
-  // parameter (the lift equation for a thrust limit) is worse than saying nothing.
   return entry.equations.find((eq) => tokens.some((t) => eq.toLowerCase().includes(t))) || null;
 }
 
@@ -113,52 +135,98 @@ function relevantFailureMode(simType, paramName) {
   return entry.failureModes.find((m) => tokens.some((t) => m.toLowerCase().includes(t))) || null;
 }
 
+/** "Wind_Speed" → "wind speed", so prose never leaks a variable name. */
+function humanName(paramName) {
+  return String(paramName).replace(/[_-]+/g, " ").toLowerCase();
+}
+
+/** "Wind_Speed" → "Wind speed", for the headline. */
+function titleName(paramName) {
+  const h = humanName(paramName);
+  return h.charAt(0).toUpperCase() + h.slice(1);
+}
+
 /**
- * Explains a breached constraint the way a tutor would: what physically happens
- * at this value, which law governs it, and what fails next.
+ * Finds how steeply the effect grows with this parameter — squared, cubed, or
+ * linear — by reading the exponents out of the physics text.
  *
- * The generator already writes a real physics reason into `constraint.explanation`
- * ("At 35 m/s blade fatigue stress exceeds material yield strength"). That was
- * being discarded in favour of a template that only restated the thresholds back
- * at the user, which teaches nothing. This uses the real reason first and falls
- * back to the knowledge base rather than to a restatement.
+ * This is the single most useful thing to tell a learner: "1 m/s over the line"
+ * sounds harmless until you know the load went up with the square of speed.
+ */
+function detectScaling(texts) {
+  const blob = texts.filter(Boolean).join(" ").toLowerCase();
+  if (/[v²]\s*³|\^3|cubed|v³/.test(blob)) return { power: 3, word: "cube" };
+  if (/²|\^2|squared|v²/.test(blob)) return { power: 2, word: "square" };
+  return null;
+}
+
+/**
+ * Explains a breached constraint in plain language, with the rigorous version
+ * kept separately for anyone who wants it.
+ *
+ * Two failures this replaces. The original template only restated the
+ * thresholds, which teaches nothing. The first attempt at fixing it went the
+ * other way and dumped the raw research text — "CFRP blade stress exceeds
+ * 500 MPa yield strength per σ = M·y/I with M ∝ v²L²" — which is correct and
+ * unreadable. A learner needs to know how far over they are, why a small
+ * overshoot matters, and what breaks; the symbols are a footnote, not the
+ * lesson.
  */
 function buildPhysicsExplanation({ simType, constraint, paramName, val, unit = "", lowerIsBad, severity }) {
-  const p = normalizeKey(paramName);
+  const name = humanName(paramName);
   const u = unit ? ` ${unit}` : "";
   // Quote the threshold the user actually crossed, not always the critical one.
   const limit = severity === "WARNING" ? constraint.warningThreshold : constraint.criticalThreshold;
-  const margin = limit != null ? Math.abs(val - limit) : null;
-
-  const parts = [];
-
-  if (margin != null && Number.isFinite(margin)) {
-    parts.push(
-      lowerIsBad
-        ? `At ${val}${u} you are ${margin}${u} below the ${limit}${u} minimum this design can tolerate.`
-        : `At ${val}${u} you are ${margin}${u} past the ${limit}${u} ceiling this design can tolerate.`,
-    );
-  }
-
-  // The physics reason the generator researched for this specific constraint.
-  if (constraint.explanation) {
-    const reason = String(constraint.explanation).trim();
-    parts.push(reason.endsWith(".") ? reason : `${reason}.`);
-  }
-
-  const eq = governingEquation(simType, paramName);
-  if (eq) parts.push(`This is governed by ${eq}, so the effect does not scale gently — it accelerates as ${p.toLowerCase()} rises.`);
-
+  const safe = lowerIsBad ? constraint.warningThreshold : constraint.warningThreshold;
+  const research = constraint.explanation ? String(constraint.explanation).trim() : null;
+  const eq = governingEquation(simType, paramName, research);
   const mode = relevantFailureMode(simType, paramName);
-  if (mode) parts.push(`Past this point the failure that appears first is ${mode.charAt(0).toLowerCase()}${mode.slice(1)}.`);
 
-  if (parts.length <= 1) {
-    parts.push(
-      `The threshold exists because the material and geometry can only absorb so much load before deformation stops being elastic and becomes permanent.`,
+  const plain = [];
+
+  // 1. How far over, in proportional terms — "1 over 35" means nothing alone.
+  if (limit != null && Number.isFinite(limit) && limit !== 0) {
+    const over = Math.abs(val - limit);
+    const pct = Math.round((over / Math.abs(limit)) * 100);
+    plain.push(
+      lowerIsBad
+        ? `You are ${over}${u} below the ${limit}${u} minimum — about ${pct}% under.`
+        : `You are ${over}${u} over the ${limit}${u} limit — about ${pct}% past it.`,
     );
   }
 
-  return parts.join(" ");
+  // 2. Why a small overshoot is not a small problem.
+  const scaling = detectScaling([research, eq]);
+  if (scaling && safe != null && Number.isFinite(safe) && safe > 0 && !lowerIsBad) {
+    const ratio = Math.pow(val / safe, scaling.power);
+    plain.push(
+      `The load does not rise in step with ${name} — it rises with the ${scaling.word} of it. ` +
+        `Going from ${safe}${u} to ${val}${u} is roughly ${ratio.toFixed(1)}× the force, not ${Math.round((val / safe - 1) * 100)}% more.`,
+    );
+  } else if (scaling) {
+    plain.push(`The load rises with the ${scaling.word} of ${name}, so overshooting by a little costs a lot.`);
+  }
+
+  // 3. What actually breaks.
+  if (mode) {
+    plain.push(`That is enough to cause ${mode.charAt(0).toLowerCase()}${mode.slice(1)}.`);
+  } else {
+    plain.push(`Past this point the structure stops flexing and starts taking permanent damage.`);
+  }
+
+  // 4. What to do about it.
+  if (safe != null && Number.isFinite(safe)) {
+    plain.push(
+      lowerIsBad
+        ? `Bring ${name} back above ${safe}${u} to return to safe operation.`
+        : `Bring ${name} back under ${safe}${u} to return to safe operation.`,
+    );
+  }
+
+  // The rigorous version, for anyone who wants the symbols.
+  const technical = [research, eq ? `Governing relation: ${eq}` : null].filter(Boolean).join("\n");
+
+  return { plain: plain.join(" "), technical };
 }
 
 function constraintSeverity(val, c) {
@@ -174,9 +242,10 @@ function constraintSeverity(val, c) {
 }
 
 function validatePhysics(simConfig, params) {
-  if (!simConfig?.constraints?.length) return { state: "OPTIMAL", explanation: "", fixedParams: simConfig?.optimalParams || {} };
+  if (!simConfig?.constraints?.length) return { state: "OPTIMAL", explanation: "", technical: "", fixedParams: simConfig?.optimalParams || {} };
   let worst = "OPTIMAL";
   let explanation = "";
+  let technical = "";
   for (const c of simConfig.constraints) {
     const val = params[normalizeKey(c.param)] ?? params[c.param];
     if (val === undefined) continue;
@@ -184,7 +253,7 @@ function validatePhysics(simConfig, params) {
     const unit = paramDef?.unit ? ` ${paramDef.unit}` : "";
     const lowerIsBad = c.criticalThreshold != null && c.warningThreshold != null && c.criticalThreshold < c.warningThreshold;
     const sev = constraintSeverity(val, c);
-    const detailed = buildPhysicsExplanation({
+    const built = buildPhysicsExplanation({
       simType: simConfig?.simType,
       constraint: c,
       paramName: c.param,
@@ -193,20 +262,23 @@ function validatePhysics(simConfig, params) {
       lowerIsBad,
       severity: sev,
     });
+    const detailed = built.plain;
     if (sev === "CRITICAL") {
       worst = "CRITICAL_FAILURE";
+      technical = built.technical;
       explanation = lowerIsBad
-        ? `${normalizeKey(c.param)} is ${val}${unit} — below the critical minimum safe value of ${c.criticalThreshold}${unit}. ${detailed}`
-        : `${normalizeKey(c.param)} is ${val}${unit} — exceeds the critical limit of ${c.criticalThreshold}${unit}. ${detailed}`;
+        ? `${titleName(c.param)} is ${val}${unit} — below the safe minimum of ${c.criticalThreshold}${unit}. ${detailed}`
+        : `${titleName(c.param)} is ${val}${unit} — past the safe limit of ${c.criticalThreshold}${unit}. ${detailed}`;
       break;
     } else if (sev === "WARNING" && worst !== "CRITICAL_FAILURE") {
       worst = "WARNING";
+      technical = built.technical;
       explanation = lowerIsBad
-        ? `${normalizeKey(c.param)} is ${val}${unit}, approaching the minimum safe threshold. ${detailed}`
-        : `${normalizeKey(c.param)} is ${val}${unit}, approaching the critical limit of ${c.criticalThreshold}${unit}. ${detailed}`;
+        ? `${titleName(c.param)} is ${val}${unit} — nearing the safe minimum. ${detailed}`
+        : `${titleName(c.param)} is ${val}${unit} — nearing the safe limit of ${c.criticalThreshold}${unit}. ${detailed}`;
     }
   }
-  return { state: worst, explanation, fixedParams: simConfig?.optimalParams || {} };
+  return { state: worst, explanation, technical, fixedParams: simConfig?.optimalParams || {} };
 }
 
 function findByKey(obj, key) {
