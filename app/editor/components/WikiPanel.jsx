@@ -215,7 +215,7 @@ export default function WikiPanel({ wikiArticle, journals, onCompile, compiling 
       {!hasArticle && !compiling && (
         <div className="rounded-2xl border border-white/6 bg-white/[0.02] px-3 py-3">
           <p className="text-[10px] text-white/35 leading-relaxed">
-            <strong className="text-white/50">Karpathy LLM Wiki Pattern:</strong> Your journals are raw data. Compile compresses them into structured wiki articles with backlinks — just like Karpathy's evolving markdown knowledge base. Each compile enriches the previous version.
+            Your journals are raw material. Compiling turns them into structured, cross-linked articles, and each compile builds on the last.
           </p>
         </div>
       )}
