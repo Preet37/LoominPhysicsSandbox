@@ -317,6 +317,25 @@ export default function PhysicsEditorPage() {
       setEditorValue(`## Generating: ${topic}\n\n_Initialising multi-agent pipeline…_\n`);
     }
 
+    // Kick the mesh off now rather than when the scene mounts. The topic is the
+    // only input it needs, but the scene does not exist until notes and
+    // SIMCONFIG have finished — so waiting served the two ~90s jobs back to
+    // back. Fired without await: the response is discarded here and collected
+    // from the cache when the scene actually asks for it.
+    if (quality === "photoreal") {
+      fetch("/api/generate-3d", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          topic,
+          prompt: `High quality 3D model of ${topic}, detailed, realistic`,
+          style: "realistic",
+        }),
+      }).catch(() => {
+        /* The scene retries on mount; a failed prefetch must not break notes. */
+      });
+    }
+
     const idle = { status: "idle", msg: "", toolCalls: 0 };
     setAgentStates({ research: idle, design: idle, validator: idle });
     setPipelineMeta({ totalToolCalls: 0, ragUsed: false, visible: true });
@@ -782,6 +801,9 @@ export default function PhysicsEditorPage() {
                         </button>
                         <button onClick={() => setQuality("fast")} className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${quality === "fast" ? "bg-amber-600/40 ring-1 ring-amber-500/50 text-amber-300" : "text-white/40 hover:text-white/60"}`}>
                           <Zap className="h-3 w-3" /> Fast
+                        </button>
+                        <button onClick={() => setQuality("photoreal")} className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${quality === "photoreal" ? "bg-emerald-600/40 ring-1 ring-emerald-500/50 text-emerald-300" : "text-white/40 hover:text-white/60"}`}>
+                          <Sparkles className="h-3 w-3" /> Photoreal
                         </button>
                       </div>
                       <div className="flex items-center gap-2 flex-shrink-0">

@@ -24,6 +24,8 @@ import PhysicsBreadboard from "./components/PhysicsBreadboard";
 import Arm from "./components/Arm";
 import HighQualityModel from "./components/HighQualityModel";
 import ProceduralGLBModel from "./components/ProceduralGLBModel";
+import Tripo3DModel from "./components/Tripo3DModel";
+import FlowOverlay from "./components/FlowOverlay";
 import DynamicPhysicsScene from "./components/DynamicPhysicsScene";
 
 // Known sim types with dedicated physics scenes
@@ -85,7 +87,10 @@ function SceneContent({ simType, params, simConfig, topic, sceneCode, quality, s
   const isKnown = KNOWN_TYPES.includes(simType) || isNewtonsCradle;
   const showGround = simType !== "orbit";
   // High Quality (thinking) → CAD/GLB via Blender/OpenSCAD. Fast → R3F JSX blocks.
-  const wantsCad = quality !== "fast";
+  // Photoreal → a generated textured mesh, which is the only path that covers
+  // arbitrary topics: it ignores simType entirely and models whatever was typed.
+  const wantsPhotoreal = quality === "photoreal";
+  const wantsCad = quality !== "fast" && !wantsPhotoreal;
   const [cadReady, setCadReady] = useState(wantsCad ? null : true);
 
   useEffect(() => {
@@ -115,6 +120,22 @@ function SceneContent({ simType, params, simConfig, topic, sceneCode, quality, s
 
   const useCadPath = wantsCad && cadReady === true;
   const cadFallback = wantsCad && cadReady === false;
+
+  // Photoreal replaces the scene rather than adding to it: the mesh is the
+  // subject, and a hand-built rig behind it would fight for the same space.
+  if (wantsPhotoreal && topic) {
+    return (
+      <>
+        <ambientLight intensity={0.7} />
+        <directionalLight position={[10, 20, 10]} intensity={1.5} castShadow shadow-mapSize={2048} />
+        <directionalLight position={[-6, 8, 6]} intensity={0.8} color="#dbeafe" />
+        <hemisphereLight intensity={0.8} color="#f8fbff" groundColor="#0b1220" />
+        <FlowOverlay params={params} simConfig={simConfig}>
+          <Tripo3DModel topic={topic} />
+        </FlowOverlay>
+      </>
+    );
+  }
 
   return (
     <>

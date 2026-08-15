@@ -16,10 +16,13 @@ const PREBUILT_TOPICS = ['motherboard', 'circuit', 'mechanical', 'solar', 'engin
 
 export default function GenericVisual() {
   const groupRef = useRef();
-  // Tripo3D DISABLED - GLB loading fails, wastes credits
-  // Using HighQualityModel instead (generates component code like Arm.jsx)
-  const [useTripo, setUseTripo] = useState(false);
-  const [tripoFailed, setTripoFailed] = useState(true);
+  // Tripo3D is the first rung of the model cascade: Tripo → HighQualityModel →
+  // procedural primitives. It was switched off while its meshes were unloadable
+  // (Tripo's CDN sends no CORS header, so GLTFLoader never got the bytes);
+  // /api/model-proxy now serves them same-origin. onFallback still trips
+  // tripoFailed on any error, so the cascade degrades exactly as before.
+  const [useTripo, setUseTripo] = useState(true);
+  const [tripoFailed, setTripoFailed] = useState(false);
   
   const activeId = useLoominStore((s) => s.activeId);
   const journals = useLoominStore((s) => s.journals);

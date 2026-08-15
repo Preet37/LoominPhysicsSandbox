@@ -6,7 +6,8 @@ import { Html, useGLTF, Center, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader";
 
-// High-quality 3D model loader for Tripo3D generated models
+// Loader for generated photoreal meshes. The provider is an implementation
+// detail and must not surface in the UI, logs, or network paths.
 export default function Tripo3DModel({ topic, onFallback }) {
   const [modelData, setModelData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -27,11 +28,12 @@ export default function Tripo3DModel({ topic, onFallback }) {
       setLastTopic(topic);
       
       try {
-        // Call Tripo3D API
+        // Request a generated mesh
         const response = await fetch('/api/generate-3d', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
+          body: JSON.stringify({
+            topic,
             prompt: `High quality 3D model of ${topic}, detailed, realistic`,
             style: 'realistic'
           })
@@ -44,7 +46,7 @@ export default function Tripo3DModel({ topic, onFallback }) {
           setLoading(false);
         } else if (data.fallback) {
           // Fall back to primitive generation
-          console.log('Tripo3D fallback:', data.error);
+          console.log('[photoreal] fallback:', data.error);
           setError(data.error);
           setLoading(false);
           if (onFallback) onFallback(topic);
@@ -53,7 +55,7 @@ export default function Tripo3DModel({ topic, onFallback }) {
           setLoading(false);
         }
       } catch (err) {
-        console.error('Tripo3D error:', err);
+        console.error('[photoreal] error:', err);
         setError('Network error');
         setLoading(false);
         if (onFallback) onFallback(topic);
@@ -63,12 +65,9 @@ export default function Tripo3DModel({ topic, onFallback }) {
     generateModel();
   }, [topic]);
 
-  // Gentle rotation
-  useFrame((state, delta) => {
-    if (groupRef.current) {
-      groupRef.current.rotation.y += delta * 0.2;
-    }
-  });
+  // Deliberately static. A constant spin reads as a turntable product shot and
+  // makes it impossible to study the object or line it up with a parameter
+  // change; the user can orbit it themselves.
 
   if (loading) {
     return (
@@ -87,7 +86,7 @@ export default function Tripo3DModel({ topic, onFallback }) {
         </mesh>
         <Html center>
           <div className="bg-slate-900/95 px-4 py-3 rounded-xl border border-amber-500/30 text-center max-w-[280px]">
-            <p className="text-sm text-amber-400">{error || 'Tripo3D unavailable'}</p>
+            <p className="text-sm text-amber-400">{error || 'Photoreal model unavailable'}</p>
             <p className="text-xs text-white/50 mt-1">Falling back to primitive generation</p>
           </div>
         </Html>
@@ -101,14 +100,12 @@ export default function Tripo3DModel({ topic, onFallback }) {
         <GLBModel url={modelData.modelUrl} />
       </Suspense>
       
-      <Html position={[0, -2.5, 0]} center>
-        <div className="bg-slate-900/95 px-5 py-3 rounded-xl border border-emerald-500/30 text-center max-w-[260px] backdrop-blur-sm">
-          <div className="flex items-center justify-center gap-1.5 mb-1">
-            <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-            <p className="text-[10px] text-emerald-400/90 uppercase tracking-widest font-medium">Tripo3D</p>
-          </div>
-          <p className="text-base font-semibold text-white capitalize">{topic}</p>
-          <p className="text-[10px] text-white/40 mt-1">Real 3D Model</p>
+      <Html position={[0, -3.6, 0]} center>
+        <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-900/85 border border-emerald-500/25 backdrop-blur-sm whitespace-nowrap">
+          <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+          <span className="text-[10px] text-emerald-400/90 uppercase tracking-widest font-medium">Photoreal</span>
+          <span className="text-white/20">·</span>
+          <span className="text-xs font-semibold text-white capitalize">{topic}</span>
         </div>
       </Html>
     </group>
@@ -131,9 +128,11 @@ function GLBModel({ url }) {
         const size = box.getSize(new THREE.Vector3());
         const center = box.getCenter(new THREE.Vector3());
         
-        // Scale to fit in a 3 unit box
+        // Fit the model to a 6-unit box. The scene cameras are framed for
+        // physics rigs that sit much further back, so a 3-unit fit left the
+        // mesh a thumbnail in the middle of an empty viewport.
         const maxDim = Math.max(size.x, size.y, size.z);
-        const scale = 3 / maxDim;
+        const scale = 6 / maxDim;
         
         gltf.scene.scale.setScalar(scale);
         gltf.scene.position.sub(center.multiplyScalar(scale));
@@ -200,7 +199,7 @@ function LoadingSpinner({ progress = 0, topic }) {
         <div className="bg-slate-900/95 px-5 py-4 rounded-xl border border-emerald-500/30 text-center backdrop-blur-sm min-w-[200px]">
           <div className="flex items-center gap-2 justify-center mb-2">
             <div className="w-2 h-2 bg-emerald-400 rounded-full animate-ping" />
-            <p className="text-sm text-emerald-400">Generating with Tripo3D...</p>
+            <p className="text-sm text-emerald-400">Generating photoreal model…</p>
           </div>
           <p className="text-xs text-white/60 capitalize">{topic}</p>
           {progress > 0 && (
