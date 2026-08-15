@@ -27,7 +27,7 @@ export default function StatusCard({ physicsState, onAutoFix }) {
         initial={{ opacity: 0, y: -8 }}
         animate={{ opacity: 1, y: 0 }}
         exit={{ opacity: 0, y: -8 }}
-        className="absolute top-4 left-4 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-950/80 border border-emerald-500/40 backdrop-blur-md"
+        className="absolute top-4 left-4 z-50 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-950/80 border border-emerald-500/40 backdrop-blur-md"
       >
         <CheckCircle className="h-3.5 w-3.5 text-emerald-400" />
         <span className="text-xs font-mono font-bold text-emerald-400 tracking-wider">OPTIMAL</span>
@@ -48,7 +48,7 @@ export default function StatusCard({ physicsState, onAutoFix }) {
       initial={{ opacity: 0, scale: 0.95, y: -4 }}
       animate={{ opacity: 1, scale: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.95 }}
-      className={`absolute top-4 left-4 w-[340px] rounded-2xl ${color.bg} border ${color.border} backdrop-blur-md overflow-hidden shadow-lg ${color.shadow}`}
+      className={`absolute top-4 left-4 z-50 w-[340px] rounded-2xl ${color.bg} border ${color.border} backdrop-blur-md overflow-hidden shadow-lg ${color.shadow}`}
     >
       {/* Header row */}
       <div className={`flex items-center gap-2 px-3.5 py-2.5 border-b ${color.head}`}>

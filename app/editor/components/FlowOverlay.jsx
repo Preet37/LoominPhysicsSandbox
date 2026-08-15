@@ -202,12 +202,22 @@ function ForceArrow({ entry, slot }) {
  * representation on a baked mesh (tyre pressure, brake balance). Without this,
  * dragging those sliders changed nothing anywhere in the viewport and looked
  * broken; the bar makes each one visibly connected to the scene.
+ *
+ * Anchored to the viewport rather than to a point in the scene: positioned in
+ * world space it drifted with the camera and slid out of frame on zoom, which
+ * is the one thing a readout must never do.
  */
 function ParameterReadout({ entries, driven }) {
   if (!entries.length) return null;
   return (
-    <Html position={[-5.0, 3.3, 0]} zIndexRange={[30, 20]}>
-      <div className="flex flex-col gap-1 px-2.5 py-2 rounded-lg bg-slate-950/70 border border-white/10 backdrop-blur-sm min-w-[150px] pointer-events-none">
+    <Html
+      calculatePosition={(_el, _camera, size) => [size.width - 12, size.height - 12]}
+      zIndexRange={[30, 20]}
+    >
+      <div
+        className="flex flex-col gap-1 px-2.5 py-2 rounded-lg bg-slate-950/70 border border-white/10 backdrop-blur-sm min-w-[150px]"
+        style={{ transform: "translate(-100%, -100%)", pointerEvents: "none" }}
+      >
         {entries.map((e) => {
           const t = normalize(e.value, e.meta);
           const isDriven = driven.has(e.name);

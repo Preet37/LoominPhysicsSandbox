@@ -18,9 +18,36 @@ export const maxDuration = 300;
 // In-memory cache, to save credits. Parked on globalThis rather than in module
 // scope because every hot reload in dev creates a fresh module — which silently
 // threw away warmed models and re-billed the next request.
-const globalCache = globalThis as unknown as { __tripoModelCache?: Map<string, any> };
+const globalCache = globalThis as unknown as {
+  __tripoModelCache?: Map<string, any>;
+  __tripoInFlight?: Map<string, Promise<any>>;
+};
 const modelCache: Map<string, any> = globalCache.__tripoModelCache ?? new Map<string, any>();
 globalCache.__tripoModelCache = modelCache;
+
+/**
+ * Generations already running, keyed the same way as the cache.
+ *
+ * The editor prefetches a mesh the moment a topic is submitted, then the scene
+ * asks for the same mesh again when it mounts ~40s later. The cache is only
+ * populated on completion, so the second request used to miss, start its own
+ * paid task, and wait the full duration from mount — losing the entire benefit
+ * of prefetching and billing twice. Joining the in-flight promise instead makes
+ * the prefetch actually overlap with notes generation.
+ */
+const inFlight: Map<string, Promise<any>> = globalCache.__tripoInFlight ?? new Map();
+globalCache.__tripoInFlight = inFlight;
+
+/**
+ * Tasks that were paid for but outran our poll window, keyed like the cache.
+ *
+ * Generation usually lands in 80-115s but has been observed past 220s. When we
+ * gave up, the credits were already spent and the task went on to finish
+ * upstream — so the retry created a second task and paid again. Remembering the
+ * id lets the next request resume the existing one for free.
+ */
+const resumable: Map<string, string> = (globalCache as any).__tripoResumable ?? new Map();
+(globalCache as any).__tripoResumable = resumable;
 
 export async function POST(req: Request) {
   try {
@@ -67,9 +94,50 @@ export async function POST(req: Request) {
       });
     }
 
-    // Step 1: Create a generation task
-    console.log('Creating Tripo3D task for:', prompt);
-    
+    // Join a generation already running for this topic rather than starting a
+    // second paid one.
+    const existing = inFlight.get(cacheKey);
+    if (existing) {
+      console.log('[photoreal] joining in-flight generation:', libraryTopic);
+      return NextResponse.json(await existing);
+    }
+
+    const job = runGeneration({ prompt, libraryKey, cacheKey });
+    inFlight.set(cacheKey, job);
+    try {
+      return NextResponse.json(await job);
+    } finally {
+      inFlight.delete(cacheKey);
+    }
+  } catch (error) {
+    console.error('[photoreal] error:', error);
+    return NextResponse.json({
+      success: false,
+      error: 'Internal error',
+      fallback: true
+    });
+  }
+}
+
+interface GenerationArgs {
+  prompt: string;
+  libraryKey: string;
+  cacheKey: string;
+}
+
+/** Creates the task, polls it to completion, and persists the result. */
+async function runGeneration({ prompt, libraryKey, cacheKey }: GenerationArgs): Promise<any> {
+  try {
+    // A previous attempt may have paid for a task that outran its poll window.
+    // Resuming it is free; creating another is not.
+    const resumeId = resumable.get(cacheKey);
+    if (resumeId) {
+      console.log('[photoreal] resuming paid task for:', libraryKey);
+      const resumed = await pollTask(resumeId, { prompt, libraryKey, cacheKey });
+      if (resumed.success || !resumed.timedOut) resumable.delete(cacheKey);
+      return resumed;
+    }
+
     const createResponse = await fetch(`${TRIPO_BASE_URL}/task`, {
       method: 'POST',
       headers: {
@@ -91,32 +159,38 @@ export async function POST(req: Request) {
 
     if (!createResponse.ok) {
       const errorText = await createResponse.text();
-      console.error('Tripo create error:', errorText);
-      return NextResponse.json({ 
-        success: false, 
-        error: `Tripo API error: ${createResponse.status}`,
-        details: errorText,
+      console.error('[photoreal] create failed:', createResponse.status, errorText);
+      return {
+        success: false,
+        error: `Generation service returned ${createResponse.status}`,
         fallback: true
-      });
+      };
     }
 
     const createData = await createResponse.json();
     const taskId = createData.data?.task_id;
 
     if (!taskId) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'No task ID returned',
-        fallback: true
-      });
+      return { success: false, error: 'No task id returned', fallback: true };
     }
 
-    console.log('Tripo task created:', taskId);
+    return await pollTask(taskId, { prompt, libraryKey, cacheKey });
+  } catch (error) {
+    console.error('[photoreal] generation error:', error);
+    return { success: false, error: 'Generation failed', fallback: true };
+  }
+}
 
-    // Step 2: Poll for completion. Observed generations land between 78s and
-    // 115s, so a 120s ceiling was timing out work that was nearly finished.
-    const maxAttempts = 110; // ~220s, inside the 300s route budget
-    const pollInterval = 2000; // 2 seconds
+/**
+ * Polls one task to completion and persists the result. Split out so a task
+ * that outran a previous request's window can be resumed without re-paying.
+ */
+async function pollTask(taskId: string, { prompt, libraryKey, cacheKey }: GenerationArgs): Promise<any> {
+  try {
+    // Observed generations land between 78s and 220s. The ceiling sits just
+    // inside the 300s route budget so we surrender as late as possible.
+    const maxAttempts = 140; // ~280s
+    const pollInterval = 2000;
     
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       await new Promise(resolve => setTimeout(resolve, pollInterval));
@@ -135,7 +209,7 @@ export async function POST(req: Request) {
       const status = statusData.data?.status;
       const progress = statusData.data?.progress || 0;
       
-      console.log(`Task ${taskId}: ${status} (${progress}%)`);
+      if (attempt % 10 === 0) console.log(`[photoreal] ${status} (${progress}%)`);
 
       if (status === 'success') {
         // v3.0 returns the textured mesh as `pbr_model`; older responses used
@@ -186,33 +260,25 @@ export async function POST(req: Request) {
 
         modelCache.set(cacheKey, result);
 
-        return NextResponse.json(result);
+        return result;
       }
 
       if (status === 'failed') {
-        return NextResponse.json({ 
-          success: false, 
-          error: 'Model generation failed',
-          fallback: true
-        });
+        return { success: false, error: 'Model generation failed', fallback: true };
       }
     }
 
-    // Timeout
-    return NextResponse.json({ 
-      success: false, 
-      error: 'Generation timed out',
-      taskId,
+    // Paid for, unfinished. Keep the id so the next request resumes it.
+    resumable.set(cacheKey, taskId);
+    return {
+      success: false,
+      error: 'Still generating — ask again in a moment and it will resume.',
+      timedOut: true,
       fallback: true
-    });
-
+    };
   } catch (error) {
-    console.error('Generate 3D error:', error);
-    return NextResponse.json({ 
-      success: false, 
-      error: 'Internal error',
-      fallback: true
-    });
+    console.error('[photoreal] poll error:', error);
+    return { success: false, error: 'Generation failed', fallback: true };
   }
 }
 

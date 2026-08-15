@@ -100,12 +100,17 @@ export default function Tripo3DModel({ topic, onFallback }) {
         <GLBModel url={modelData.modelUrl} />
       </Suspense>
       
-      {/* Bottom-left, clear of the force vectors that converge below the body. */}
-      <Html position={[-5.0, -3.5, 0]} zIndexRange={[30, 20]}>
-        <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-900/85 border border-emerald-500/25 backdrop-blur-sm whitespace-nowrap">
+      {/* Viewport-anchored, bottom-left: pinned in world space it drifted off
+          frame on zoom, and it named the render mode rather than the subject. */}
+      <Html
+        calculatePosition={(_el, _camera, size) => [12, size.height - 12]}
+        zIndexRange={[30, 20]}
+      >
+        <div
+          className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-900/85 border border-emerald-500/25 backdrop-blur-sm whitespace-nowrap"
+          style={{ transform: "translate(0, -100%)", pointerEvents: "none" }}
+        >
           <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
-          <span className="text-[10px] text-emerald-400/90 uppercase tracking-widest font-medium">Photoreal</span>
-          <span className="text-white/20">·</span>
           <span className="text-xs font-semibold text-white capitalize">{topic}</span>
         </div>
       </Html>

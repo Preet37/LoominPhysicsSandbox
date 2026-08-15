@@ -9,6 +9,7 @@ import {
   FileText, Sigma, BarChart2, Code2, Paperclip, BookOpen, GraduationCap,
 } from "lucide-react";
 import { useLoominStore } from "./store";
+import { PHYSICS_KB } from "@/lib/physics-kb";
 import PhysicsScene from "./PhysicsScene";
 import StatusCard from "./components/StatusCard";
 import AskAIDrawer from "./components/AskAIDrawer";
@@ -94,10 +95,70 @@ function parseSIMCONFIG(text) {
   return null;
 }
 
-function buildPhysicsFallbackExplanation(simType, paramName, val, warn, crit, unit = "") {
+/** Picks the equation from the knowledge base that actually governs this parameter. */
+function governingEquation(simType, paramName) {
+  const entry = PHYSICS_KB?.[simType];
+  if (!entry?.equations?.length) return null;
+  const tokens = String(paramName).toLowerCase().split(/[_\s-]+/).filter((t) => t.length > 2);
+  // No fallback to equations[0]: naming a law that does not actually govern this
+  // parameter (the lift equation for a thrust limit) is worse than saying nothing.
+  return entry.equations.find((eq) => tokens.some((t) => eq.toLowerCase().includes(t))) || null;
+}
+
+/** The failure mode this parameter drives, when the knowledge base names one. */
+function relevantFailureMode(simType, paramName) {
+  const entry = PHYSICS_KB?.[simType];
+  if (!entry?.failureModes?.length) return null;
+  const tokens = String(paramName).toLowerCase().split(/[_\s-]+/).filter((t) => t.length > 2);
+  return entry.failureModes.find((m) => tokens.some((t) => m.toLowerCase().includes(t))) || null;
+}
+
+/**
+ * Explains a breached constraint the way a tutor would: what physically happens
+ * at this value, which law governs it, and what fails next.
+ *
+ * The generator already writes a real physics reason into `constraint.explanation`
+ * ("At 35 m/s blade fatigue stress exceeds material yield strength"). That was
+ * being discarded in favour of a template that only restated the thresholds back
+ * at the user, which teaches nothing. This uses the real reason first and falls
+ * back to the knowledge base rather than to a restatement.
+ */
+function buildPhysicsExplanation({ simType, constraint, paramName, val, unit = "", lowerIsBad, severity }) {
   const p = normalizeKey(paramName);
   const u = unit ? ` ${unit}` : "";
-  return `${p} at ${val}${u} has exceeded the safe operating range (warning: ${warn}${u}, critical: ${crit}${u}). Reduce the parameter incrementally to restore optimal state.`;
+  // Quote the threshold the user actually crossed, not always the critical one.
+  const limit = severity === "WARNING" ? constraint.warningThreshold : constraint.criticalThreshold;
+  const margin = limit != null ? Math.abs(val - limit) : null;
+
+  const parts = [];
+
+  if (margin != null && Number.isFinite(margin)) {
+    parts.push(
+      lowerIsBad
+        ? `At ${val}${u} you are ${margin}${u} below the ${limit}${u} minimum this design can tolerate.`
+        : `At ${val}${u} you are ${margin}${u} past the ${limit}${u} ceiling this design can tolerate.`,
+    );
+  }
+
+  // The physics reason the generator researched for this specific constraint.
+  if (constraint.explanation) {
+    const reason = String(constraint.explanation).trim();
+    parts.push(reason.endsWith(".") ? reason : `${reason}.`);
+  }
+
+  const eq = governingEquation(simType, paramName);
+  if (eq) parts.push(`This is governed by ${eq}, so the effect does not scale gently — it accelerates as ${p.toLowerCase()} rises.`);
+
+  const mode = relevantFailureMode(simType, paramName);
+  if (mode) parts.push(`Past this point the failure that appears first is ${mode.charAt(0).toLowerCase()}${mode.slice(1)}.`);
+
+  if (parts.length <= 1) {
+    parts.push(
+      `The threshold exists because the material and geometry can only absorb so much load before deformation stops being elastic and becomes permanent.`,
+    );
+  }
+
+  return parts.join(" ");
 }
 
 function constraintSeverity(val, c) {
@@ -121,9 +182,17 @@ function validatePhysics(simConfig, params) {
     if (val === undefined) continue;
     const paramDef = simConfig.params?.find((p) => p.name === c.param);
     const unit = paramDef?.unit ? ` ${paramDef.unit}` : "";
-    const detailed = buildPhysicsFallbackExplanation(simConfig?.simType, c.param, val, c.warningThreshold, c.criticalThreshold, paramDef?.unit || "");
     const lowerIsBad = c.criticalThreshold != null && c.warningThreshold != null && c.criticalThreshold < c.warningThreshold;
     const sev = constraintSeverity(val, c);
+    const detailed = buildPhysicsExplanation({
+      simType: simConfig?.simType,
+      constraint: c,
+      paramName: c.param,
+      val,
+      unit: paramDef?.unit || "",
+      lowerIsBad,
+      severity: sev,
+    });
     if (sev === "CRITICAL") {
       worst = "CRITICAL_FAILURE";
       explanation = lowerIsBad
@@ -738,10 +807,8 @@ export default function PhysicsEditorPage() {
                 <div className={`h-2 w-2 rounded-full ${liveOk ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)] animate-pulse" : "bg-red-400 shadow-[0_0_8px_rgba(239,68,68,0.8)] animate-pulse"}`} />
                 <span className={`text-xs font-mono font-semibold ${liveOk ? "text-emerald-400" : "text-red-400"}`}>{liveOk ? "LIVE" : "ERROR"}</span>
               </div>
-              <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl ring-1 backdrop-blur-md ${liveOk ? "bg-white/5 ring-white/10" : "bg-red-950/40 ring-red-500/20"}`}>
-                {liveOk ? <CheckCircle className="h-3.5 w-3.5 text-emerald-400" /> : <AlertTriangle className="h-3.5 w-3.5 text-red-400" />}
-                <span className={`text-xs ${liveOk ? "text-white/60" : "text-red-300"}`}>{liveOk ? "System Ready" : "Error Detected"}</span>
-              </div>
+              {/* The LIVE/ERROR pill already carries this state; a second chip
+                  saying the same thing in different words was pure noise. */}
               <button onClick={() => setAskDrawerOpen(true)} className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-indigo-500/15 ring-1 ring-indigo-500/30 hover:bg-indigo-500/25 transition text-xs font-semibold text-indigo-300">
                 <Brain className="h-3.5 w-3.5" />
                 Ask AI
