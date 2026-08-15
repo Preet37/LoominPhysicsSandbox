@@ -14,11 +14,30 @@
 
 import { NextResponse } from "next/server";
 import { retrievePhysicsKnowledge, classifySimType } from "@/lib/physics-kb";
+import {
+  MediaTooLargeError,
+  TranscriptionUnavailableError,
+  formatTranscriptForNotes,
+  isMediaFile,
+  transcribeMedia,
+} from "@/lib/transcribeMedia";
+
+/** Transcribing an hour of lecture audio runs well past the default ceiling. */
+export const maxDuration = 300;
 
 const GROQ_BASE = "https://api.groq.com/openai/v1";
 const GROQ_MODEL = "llama-3.3-70b-versatile";
 const NVIDIA_BASE = "https://integrate.api.nvidia.com/v1";
 const NVIDIA_MODEL = "nvidia/llama-3.1-nemotron-nano-8b-v1";
+
+/** Trims to a length without cutting a word or an unbalanced LaTeX span in half. */
+function truncateOnWord(text: string, max: number): string {
+  const clean = text.trim();
+  if (clean.length <= max) return clean;
+  const cut = clean.slice(0, max);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${(lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut).trim()}…`;
+}
 
 // ── Text extraction ───────────────────────────────────────────────────────────
 
@@ -169,14 +188,25 @@ Output ONLY the notes, no explanation.`;
       content = data.choices?.[0]?.message?.content || "";
     }
 
-    // Extract summary (first 2-3 sentences before the first ##)
-    const summaryMatch = content.match(/^((?:[^#\n].+\n*){1,4})/);
-    const summary = summaryMatch?.[1]?.trim()?.slice(0, 400) || content.slice(0, 300);
+    // Summary: the first real prose, with headings and list markers dropped.
+    // Slicing the raw content instead put "## Topic ### Introduction" in the
+    // card preview.
+    const prose = content
+      .split("\n")
+      .filter((line) => line.trim() && !/^\s*#{1,6}\s/.test(line) && !/^\s*[-*•]\s/.test(line))
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const summary = truncateOnWord(prose, 400) || content.slice(0, 300);
 
-    // Extract key points from the Key Physics Concepts section
-    const kpMatch = content.match(/### Key Physics Concepts([\s\S]*?)(?=###|---)/i);
+    // Key points: bullets from the concepts section. The marker must be at the
+    // start of a line — an unanchored match caught the hyphen inside
+    // "tip-speed ratio" and captured the tail of that sentence as a bullet.
+    const kpMatch = content.match(/### Key Physics Concepts([\s\S]*?)(?=\n###|\n---|$)/i);
     const keyPoints = kpMatch
-      ? kpMatch[1].match(/[-•]\s*(.+)/g)?.map((l) => l.replace(/^[-•]\s*/, "").slice(0, 100)) || []
+      ? Array.from(kpMatch[1].matchAll(/^\s*(?:[-*•]|\d+\.)\s+(.+?)\s*$/gm))
+          .map((m) => truncateOnWord(m[1].trim(), 140))
+          .filter((s) => s.length > 8)
       : [];
 
     return { notes: content, summary, keyPoints: keyPoints.slice(0, 6) };
@@ -198,8 +228,10 @@ export async function POST(req: Request) {
     let fileName = "";
     let fileType = "";
     let fileBuffer: Buffer | null = null;
+    let fileMime = "";
     let url: string | null = null;
     let rawText: string | null = null;
+    let transcriptMeta: { durationSec: number; segmentCount: number } | null = null;
 
     if (contentType.includes("application/json")) {
       const json = await req.json();
@@ -214,6 +246,7 @@ export async function POST(req: Request) {
       fileType = (formData.get("fileType") as string) || "document";
 
       if (file && file.size > 0) {
+        fileMime = file.type || "";
         const arrayBuffer = await file.arrayBuffer();
         fileBuffer = Buffer.from(arrayBuffer);
       }
@@ -238,11 +271,31 @@ export async function POST(req: Request) {
           extractedText = await extractPDF(fileBuffer);
         } else if (lowerName.endsWith(".docx") || lowerName.endsWith(".doc")) {
           extractedText = await extractDOCX(fileBuffer);
+        } else if (isMediaFile(fileName, fileMime) || fileType === "video" || fileType === "audio") {
+          // Recordings must be transcribed before anything downstream can read
+          // them; decoding the container as utf-8 yields binary noise that the
+          // note generator will still confidently summarise.
+          const transcript = await transcribeMedia(fileBuffer, fileName, fileMime);
+          if (!transcript.text) {
+            return NextResponse.json(
+              { error: "No speech was found in that recording. Check it has an audio track." },
+              { status: 422 },
+            );
+          }
+          extractedText = formatTranscriptForNotes(transcript);
+          transcriptMeta = {
+            durationSec: Math.round(transcript.durationSec),
+            segmentCount: transcript.segments.length,
+          };
         } else {
           // Plain text fallback
           extractedText = fileBuffer.toString("utf-8");
         }
       } catch (parseErr) {
+        if (parseErr instanceof MediaTooLargeError || parseErr instanceof TranscriptionUnavailableError) {
+          // Actionable on its own — do not bury it in a generic failure.
+          return NextResponse.json({ error: parseErr.message }, { status: 413 });
+        }
         console.warn("[analyze_document] parse error:", parseErr);
         // Fallback to treating as text
         extractedText = fileBuffer.toString("utf-8").slice(0, 4000);
@@ -278,6 +331,7 @@ export async function POST(req: Request) {
       summary: summary.slice(0, 400),
       keyPoints,
       generatedNotes: notes,
+      ...(transcriptMeta ? { transcript: transcriptMeta } : {}),
     });
   } catch (error) {
     console.error("[analyze_document]", error);

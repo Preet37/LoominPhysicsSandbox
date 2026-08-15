@@ -3,12 +3,12 @@
 import { useState, useRef } from "react";
 import { Paperclip, Upload, X, Loader2, FileText, FileVideo, Globe, Trash2, Sparkles, CheckCircle, AlertCircle, Youtube, FilePlus } from "lucide-react";
 
-const ACCEPT = ".pdf,.doc,.docx,.txt,.ppt,.pptx,video/*";
+const ACCEPT = ".pdf,.doc,.docx,.txt,.ppt,.pptx,video/*,audio/*";
 
 function getFileIcon(type) {
   if (!type) return <FileText className="h-4 w-4 text-white/40" />;
   if (type.includes("pdf")) return <FileText className="h-4 w-4 text-red-400" />;
-  if (type.includes("video") || type === "youtube") return <FileVideo className="h-4 w-4 text-indigo-400" />;
+  if (type.includes("video") || type === "audio" || type === "youtube") return <FileVideo className="h-4 w-4 text-indigo-400" />;
   if (type === "url") return <Globe className="h-4 w-4 text-cyan-400" />;
   return <FileText className="h-4 w-4 text-emerald-400" />;
 }
@@ -40,7 +40,12 @@ function SourceCard({ source, onRemove, onGenerateNotes }) {
             <AlertCircle className="h-3.5 w-3.5 text-red-400" />
           )}
           {source.status === "processing" && (
-            <Loader2 className="h-3.5 w-3.5 text-amber-400 animate-spin" />
+            <>
+              {source.statusLabel && (
+                <span className="text-[10px] text-amber-300/80 whitespace-nowrap">{source.statusLabel}</span>
+              )}
+              <Loader2 className="h-3.5 w-3.5 text-amber-400 animate-spin" />
+            </>
           )}
           <button
             onClick={() => onRemove(source.id)}
@@ -134,20 +139,35 @@ function UrlInput({ onAdd }) {
 
 export default function SourcesPanel({ sources = [], onAddSource, onRemoveSource, onGenerateFromSource }) {
   const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [urlMode, setUrlMode] = useState(false);
   const fileRef = useRef();
 
+  // Recordings take a transcription round trip before notes, so the card needs
+  // to say so — a silent "processing" for a minute reads as a hang.
+  const kindOf = (file) =>
+    file.type.includes("pdf") || file.name.toLowerCase().endsWith(".pdf")
+      ? "pdf"
+      : file.type.startsWith("video/")
+        ? "video"
+        : file.type.startsWith("audio/")
+          ? "audio"
+          : "document";
+
   const processFile = async (file) => {
     if (!file) return;
     setUploading(true);
+    setUploadError("");
     const tempId = Date.now().toString();
+    const kind = kindOf(file);
 
     onAddSource({
       id: tempId,
       name: file.name,
-      fileType: file.type.includes("pdf") ? "pdf" : file.type.includes("video") ? "video" : "document",
+      fileType: kind,
       status: "processing",
+      statusLabel: kind === "video" || kind === "audio" ? "Transcribing…" : "Reading…",
       date: new Date().toLocaleDateString(),
     });
 
@@ -155,7 +175,7 @@ export default function SourcesPanel({ sources = [], onAddSource, onRemoveSource
       const formData = new FormData();
       formData.append("file", file);
       formData.append("fileName", file.name);
-      formData.append("fileType", file.type.includes("pdf") ? "pdf" : file.type.includes("video") ? "video" : "document");
+      formData.append("fileType", kind);
 
       const res = await fetch("/api/analyze_document", { method: "POST", body: formData });
       const data = await res.json();
@@ -166,7 +186,7 @@ export default function SourcesPanel({ sources = [], onAddSource, onRemoveSource
         onAddSource({
           id: data.id || Date.now().toString(),
           name: file.name,
-          fileType: file.type.includes("pdf") ? "pdf" : file.type.includes("video") ? "video" : "document",
+          fileType: kind,
           status: "ready",
           date: new Date().toLocaleDateString(),
           summary: data.summary?.slice(0, 250),
@@ -176,22 +196,30 @@ export default function SourcesPanel({ sources = [], onAddSource, onRemoveSource
           keyPoints: data.keyPoints,
         });
       } else {
+        // Surface why. A size limit or a missing audio track is fixable, but
+        // only if the message reaches the person who can fix it.
+        const reason = data.error || "Could not read that file.";
+        setUploadError(reason);
         onRemoveSource(tempId);
         onAddSource({
           id: tempId,
           name: file.name,
-          fileType: "document",
+          fileType: kind,
           status: "error",
+          statusLabel: reason,
           date: new Date().toLocaleDateString(),
         });
       }
-    } catch {
+    } catch (err) {
+      const reason = "Upload failed — check the file and your connection.";
+      setUploadError(reason);
       onRemoveSource(tempId);
       onAddSource({
         id: tempId,
         name: file.name,
-        fileType: "document",
+        fileType: kind,
         status: "error",
+        statusLabel: reason,
         date: new Date().toLocaleDateString(),
       });
     }
@@ -276,6 +304,13 @@ export default function SourcesPanel({ sources = [], onAddSource, onRemoveSource
         </div>
       )}
 
+      {uploadError && (
+        <div className="rounded-xl border border-red-500/30 bg-red-950/40 px-3 py-2 flex items-start gap-2">
+          <AlertCircle className="h-3.5 w-3.5 text-red-400 flex-shrink-0 mt-0.5" />
+          <p className="text-[11px] text-red-200/85 leading-relaxed">{uploadError}</p>
+        </div>
+      )}
+
       {/* Source list */}
       {sources.length > 0 && (
         <div className="space-y-2">
@@ -294,7 +329,7 @@ export default function SourcesPanel({ sources = [], onAddSource, onRemoveSource
       <div className="rounded-2xl border border-white/6 bg-white/[0.02] px-3 py-2.5">
         <p className="text-[10px] text-white/30 leading-relaxed">
           <strong className="text-white/45">NotebookLM-style grounding:</strong> Uploaded sources ground AI responses in your actual content. The agent uses your documents as the primary reference when generating notes.
-          Supports PDF, DOCX, TXT, video files, YouTube links, and web pages.
+          Supports PDF, DOCX, TXT, lecture recordings (MP4, MOV, MP3, M4A), YouTube links, and web pages.
         </p>
       </div>
     </div>
