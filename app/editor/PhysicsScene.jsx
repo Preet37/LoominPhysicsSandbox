@@ -27,6 +27,7 @@ import ProceduralGLBModel from "./components/ProceduralGLBModel";
 import Tripo3DModel from "./components/Tripo3DModel";
 import FlowOverlay from "./components/FlowOverlay";
 import DynamicPhysicsScene from "./components/DynamicPhysicsScene";
+import { hasCodeSim } from "./codeSims";
 
 // Known sim types with dedicated physics scenes
 const SCENE_CONFIGS = {
@@ -51,6 +52,8 @@ const SCENE_CONFIGS = {
   steam_engine:   { camera: [6, 3.5, 7],        target: [0, 1.2, 0],  fov: 40 },
   custom:         { camera: [1.8, 1.5, 2.5],    target: [0, 0.9, 0],  fov: 35 },
 };
+
+const PHOTOREAL_VIEW = { camera: [6.5, 4, 10], target: [0, 0.6, 0], fov: 40 };
 
 const KNOWN_TYPES = Object.keys(SCENE_CONFIGS).filter((k) => k !== "custom");
 
@@ -89,7 +92,10 @@ function SceneContent({ simType, params, simConfig, topic, sceneCode, quality, s
   // High Quality (thinking) → CAD/GLB via Blender/OpenSCAD. Fast → R3F JSX blocks.
   // Photoreal → a generated textured mesh, which is the only path that covers
   // arbitrary topics: it ignores simType entirely and models whatever was typed.
-  const wantsPhotoreal = quality === "photoreal";
+  // Topics with a hand-built rig stay in code even in Photoreal: the rig is
+  // fully parametric, and a generated mesh would cost a paid generation to show
+  // something the physics can do less with.
+  const wantsPhotoreal = quality === "photoreal" && !hasCodeSim(simType);
   const wantsCad = quality !== "fast" && !wantsPhotoreal;
   const [cadReady, setCadReady] = useState(wantsCad ? null : true);
 
@@ -123,7 +129,8 @@ function SceneContent({ simType, params, simConfig, topic, sceneCode, quality, s
 
   // Photoreal replaces the scene rather than adding to it: the mesh is the
   // subject, and a hand-built rig behind it would fight for the same space.
-  if (wantsPhotoreal && topic) {
+  // Wait for classification: until simType is known it may yet be a coded rig.
+  if (wantsPhotoreal && topic && simType) {
     return (
       <>
         <ambientLight intensity={0.7} />
@@ -131,7 +138,7 @@ function SceneContent({ simType, params, simConfig, topic, sceneCode, quality, s
         <directionalLight position={[-6, 8, 6]} intensity={0.8} color="#dbeafe" />
         <hemisphereLight intensity={0.8} color="#f8fbff" groundColor="#0b1220" />
         <FlowOverlay params={params} simConfig={simConfig}>
-          <Tripo3DModel topic={topic} reloadToken={geometryReload} />
+          <Tripo3DModel topic={topic} reloadToken={geometryReload} params={params} simConfig={simConfig} />
         </FlowOverlay>
       </>
     );
@@ -229,7 +236,10 @@ function SceneContent({ simType, params, simConfig, topic, sceneCode, quality, s
 }
 
 export default function PhysicsScene({ simType, params, simConfig, topic, sceneCode, quality, specSheet, geometryReload, onRegenerate, onCadUnavailable, agentSteps }) {
-  const cfg = SCENE_CONFIGS[simType] || SCENE_CONFIGS.custom;
+  // Generated meshes are fitted to a 6-unit box; the "custom" framing put the
+  // camera inside them, and a shattered mesh's fragments fell out of frame.
+  const photoreal = quality === "photoreal" && !hasCodeSim(simType);
+  const cfg = photoreal ? PHOTOREAL_VIEW : SCENE_CONFIGS[simType] || SCENE_CONFIGS.custom;
 
   if (!simType) {
     return (
@@ -247,6 +257,8 @@ export default function PhysicsScene({ simType, params, simConfig, topic, sceneC
 
   return (
     <Canvas
+      // Camera is only read on mount, so remount when the framing changes.
+      key={photoreal ? "photoreal" : simType}
       shadows
       dpr={[1, 2]}
       camera={{ fov: cfg.fov, position: cfg.camera }}

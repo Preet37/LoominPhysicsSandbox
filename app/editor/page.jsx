@@ -25,6 +25,7 @@ import PythonPanel from "./components/PythonPanel";
 import WikiPanel from "./components/WikiPanel";
 import SourcesPanel from "./components/SourcesPanel";
 import LearnPanel from "./components/LearnPanel";
+import { hasCodeSim } from "./codeSims";
 
 // ── Tab definitions ────────────────────────────────────────────────────────────
 
@@ -458,12 +459,13 @@ export default function PhysicsEditorPage() {
       setEditorValue(`## Generating: ${topic}\n\n_Initialising multi-agent pipeline…_\n`);
     }
 
-    // Kick the mesh off now rather than when the scene mounts. The topic is the
-    // only input it needs, but the scene does not exist until notes and
-    // SIMCONFIG have finished — so waiting served the two ~90s jobs back to
-    // back. Fired without await: the response is discarded here and collected
-    // from the cache when the scene actually asks for it.
-    if (quality === "photoreal") {
+    // Kick the mesh off as soon as research classifies the topic rather than
+    // when the scene mounts. The scene does not exist until notes and SIMCONFIG
+    // have finished — so waiting served the two ~90s jobs back to back. Fired
+    // without await: the response is discarded here and collected from the
+    // cache when the scene actually asks for it.
+    const prefetchPhotoreal = (simType) => {
+      if (quality !== "photoreal" || hasCodeSim(simType)) return;
       fetch("/api/generate-3d", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -475,7 +477,7 @@ export default function PhysicsEditorPage() {
       }).catch(() => {
         /* The scene retries on mount; a failed prefetch must not break notes. */
       });
-    }
+    };
 
     const idle = { status: "idle", msg: "", toolCalls: 0 };
     setAgentStates({ research: idle, design: idle, validator: idle });
@@ -511,7 +513,13 @@ export default function PhysicsEditorPage() {
               break;
             case "agent_complete":
               // Capture simType from the research agent's completion event
-              if (evt.agent === "research" && evt.simType) classifiedSimType = evt.simType;
+              if (evt.agent === "research" && evt.simType) {
+                classifiedSimType = evt.simType;
+                // Research classifies locally before any LLM call, so this still
+                // overlaps the mesh with notes generation — but skips topics that
+                // have a coded rig and would never show the mesh.
+                prefetchPhotoreal(evt.simType);
+              }
               setAgentStates((prev) => ({ ...prev, [evt.agent]: { status: "done", msg: evt.msg, toolCalls: evt.toolCalls ?? 0 } }));
               break;
             case "design_chunk":

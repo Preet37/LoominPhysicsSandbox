@@ -5,10 +5,11 @@ import { useFrame, useLoader } from "@react-three/fiber";
 import { Html, useGLTF, Center, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader";
+import BreakableModel from "./BreakableModel";
 
 // Loader for generated photoreal meshes. The provider is an implementation
 // detail and must not surface in the UI, logs, or network paths.
-export default function Tripo3DModel({ topic, onFallback, reloadToken = 0 }) {
+export default function Tripo3DModel({ topic, onFallback, reloadToken = 0, params, simConfig }) {
   const [modelData, setModelData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -101,7 +102,7 @@ export default function Tripo3DModel({ topic, onFallback, reloadToken = 0 }) {
   return (
     <group ref={groupRef} position={[0, 1, 0]}>
       <Suspense fallback={<LoadingSpinner topic={topic} />}>
-        <GLBModel url={modelData.modelUrl} />
+        <GLBModel url={modelData.modelUrl} params={params} simConfig={simConfig} />
       </Suspense>
       
       {/* Viewport-anchored, bottom-left: pinned in world space it drifted off
@@ -123,7 +124,7 @@ export default function Tripo3DModel({ topic, onFallback, reloadToken = 0 }) {
 }
 
 // GLB Model Loader Component
-function GLBModel({ url }) {
+function GLBModel({ url, params, simConfig }) {
   const groupRef = useRef();
   const [model, setModel] = useState(null);
 
@@ -180,7 +181,8 @@ function GLBModel({ url }) {
     );
   }
 
-  return <primitive ref={groupRef} object={model} />;
+  // Breakable: cracks, shatters and reassembles with the SIMCONFIG thresholds.
+  return <BreakableModel model={model} params={params} simConfig={simConfig} />;
 }
 
 // Loading animation
