@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { AlertTriangle, CheckCircle, XCircle, Zap, ChevronDown, ChevronUp } from "lucide-react";
+import { AlertTriangle, CheckCircle, XCircle, Zap, ChevronDown, ChevronUp, Loader2 } from "lucide-react";
 import { useState } from "react";
 
 // Splits "Param is X — exceeds..." header from the body explanation
@@ -16,7 +16,83 @@ function splitExplanation(text) {
   };
 }
 
-export default function StatusCard({ physicsState, onAutoFix }) {
+function Section({ label, color, children }) {
+  return (
+    <div className="space-y-1">
+      <div className={`text-[9px] font-mono font-bold uppercase tracking-[0.14em] ${color.tag} opacity-80`}>{label}</div>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * The full lesson for this breach: what broke, the causal chain with the
+ * learner's own numbers, each governing law with the intuition for why it
+ * holds, how to fix it, and where it happens for real.
+ */
+function Lesson({ data, color }) {
+  return (
+    <div className={`text-[11px] ${color.body} leading-relaxed space-y-3`}>
+      {data.whatBroke && (
+        <Section label="What broke" color={color}>
+          <p>{data.whatBroke}</p>
+        </Section>
+      )}
+
+      {data.causeChain?.length > 0 && (
+        <Section label="Why it broke" color={color}>
+          <ol className="space-y-1.5">
+            {data.causeChain.map((step, i) => (
+              <li key={i} className="flex gap-2">
+                <span className={`flex-shrink-0 w-4 h-4 mt-[1px] rounded-full border ${color.border} text-[9px] font-bold flex items-center justify-center ${color.tag}`}>
+                  {i + 1}
+                </span>
+                <span>{step}</span>
+              </li>
+            ))}
+          </ol>
+        </Section>
+      )}
+
+      {data.laws?.length > 0 && (
+        <Section label="The physics" color={color}>
+          <div className="space-y-2.5">
+            {data.laws.map((law, i) => (
+              <div key={i} className="rounded-lg bg-black/25 border border-white/10 p-2.5 space-y-1.5">
+                <div className={`text-[11px] font-semibold ${color.text}`}>{law.name}</div>
+                {law.equation && (
+                  <div className="font-mono text-[11.5px] text-white/90 bg-black/30 rounded px-2 py-1 overflow-x-auto whitespace-nowrap">
+                    {law.equation}
+                  </div>
+                )}
+                {law.roleHere && (
+                  <p><span className="text-white/45">Here: </span>{law.roleHere}</p>
+                )}
+                {law.whyItMakesSense && (
+                  <p><span className="text-white/45">Why it makes sense: </span>{law.whyItMakesSense}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {data.fix && (
+        <Section label="How to fix it" color={color}>
+          <p>{data.fix}</p>
+        </Section>
+      )}
+
+      {data.realWorld && (
+        <Section label="In the real world" color={color}>
+          <p>{data.realWorld}</p>
+        </Section>
+      )}
+    </div>
+  );
+}
+
+export default function StatusCard({ physicsState, lesson, onAutoFix }) {
   const { state, explanation, technical } = physicsState;
   const [expanded, setExpanded] = useState(true);
   // Collapsed by default: the plain explanation is the lesson, the symbols are
@@ -51,7 +127,7 @@ export default function StatusCard({ physicsState, onAutoFix }) {
       initial={{ opacity: 0, scale: 0.95, y: -4 }}
       animate={{ opacity: 1, scale: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.95 }}
-      className={`absolute top-4 left-4 z-50 w-[340px] rounded-2xl ${color.bg} border ${color.border} backdrop-blur-md overflow-hidden shadow-lg ${color.shadow}`}
+      className={`absolute top-4 left-4 z-50 w-[380px] max-w-[calc(100%-2rem)] rounded-2xl ${color.bg} border ${color.border} backdrop-blur-md overflow-hidden shadow-lg ${color.shadow}`}
     >
       {/* Header row */}
       <div className={`flex items-center gap-2 px-3.5 py-2.5 border-b ${color.head}`}>
@@ -70,16 +146,25 @@ export default function StatusCard({ physicsState, onAutoFix }) {
       </div>
 
       {expanded && explanation && (
-        <div className="px-3.5 pt-3 pb-2 max-h-[280px] overflow-y-auto loomin-scroll">
+        <div className="px-3.5 pt-3 pb-2 max-h-[380px] overflow-y-auto loomin-scroll">
           {/* What triggered */}
-          {header && (
+          {(lesson?.data?.headline || header) && (
             <div className={`text-[12px] font-semibold ${color.text} mb-2 leading-snug`}>
-              {header}
+              {lesson?.data?.headline || header}
             </div>
           )}
 
-          {/* Plain-language explanation — broken into natural paragraphs */}
-          {body && (
+          {lesson?.data && <Lesson data={lesson.data} color={color} />}
+
+          {lesson?.loading && (
+            <div className={`flex items-center gap-1.5 text-[10px] ${color.tag} opacity-70 ${lesson?.data ? "mt-2" : "mb-2"}`}>
+              <Loader2 className="h-3 w-3 animate-spin" />
+              {lesson?.data ? "Updating for the new value…" : "Writing the full explanation…"}
+            </div>
+          )}
+
+          {/* Instant template, shown until the full lesson arrives */}
+          {!lesson?.data && body && (
             <div className={`text-[11px] ${color.body} leading-relaxed space-y-2`}>
               {body.split(/(?<=\.)\s+(?=[A-Z])/).map((sentence, i) => (
                 <p key={i}>{sentence}</p>
@@ -92,7 +177,7 @@ export default function StatusCard({ physicsState, onAutoFix }) {
 
       {/* Outside the scroll container: inside it the toggle sat below the fold
           and could not be clicked without scrolling to a boundary. */}
-      {expanded && technical && (
+      {expanded && technical && !lesson?.data && (
         <div className="px-3.5 pb-1 pt-1.5 border-t border-white/10">
           <button
             onClick={() => setShowPhysics((x) => !x)}

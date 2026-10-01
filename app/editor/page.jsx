@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Sparkles, Send, Loader2, Brain, Zap, AlertTriangle, CheckCircle,
@@ -247,6 +247,8 @@ function validatePhysics(simConfig, params) {
   let worst = "OPTIMAL";
   let explanation = "";
   let technical = "";
+  // Which constraint the card is about, so the full lesson can be requested.
+  let failing = null;
   for (const c of simConfig.constraints) {
     const val = params[normalizeKey(c.param)] ?? params[c.param];
     if (val === undefined) continue;
@@ -267,6 +269,7 @@ function validatePhysics(simConfig, params) {
     if (sev === "CRITICAL") {
       worst = "CRITICAL_FAILURE";
       technical = built.technical;
+      failing = { param: c.param, value: val };
       explanation = lowerIsBad
         ? `${titleName(c.param)} is ${val}${unit} — below the safe minimum of ${c.criticalThreshold}${unit}. ${detailed}`
         : `${titleName(c.param)} is ${val}${unit} — past the safe limit of ${c.criticalThreshold}${unit}. ${detailed}`;
@@ -274,12 +277,13 @@ function validatePhysics(simConfig, params) {
     } else if (sev === "WARNING" && worst !== "CRITICAL_FAILURE") {
       worst = "WARNING";
       technical = built.technical;
+      failing = { param: c.param, value: val };
       explanation = lowerIsBad
         ? `${titleName(c.param)} is ${val}${unit} — nearing the safe minimum. ${detailed}`
         : `${titleName(c.param)} is ${val}${unit} — nearing the safe limit of ${c.criticalThreshold}${unit}. ${detailed}`;
     }
   }
-  return { state: worst, explanation, technical, fixedParams: simConfig?.optimalParams || {} };
+  return { state: worst, explanation, technical, failing, fixedParams: simConfig?.optimalParams || {} };
 }
 
 function findByKey(obj, key) {
@@ -755,6 +759,67 @@ export default function PhysicsEditorPage() {
 
   // ── Derived values ────────────────────────────────────────────────────────
 
+  // ── Failure lesson ────────────────────────────────────────────────────────
+  // The card's template can only say how far over a limit a slider is. The
+  // lesson — what broke, the causal chain, the laws and why they hold — is
+  // written for this exact situation. Debounced so dragging through the
+  // danger zone asks once the slider settles, and cached per situation.
+  const [lesson, setLesson] = useState({ key: null, data: null, loading: false });
+  const lessonCache = useRef(new Map());
+  const failing = physicsState.failing;
+  useEffect(() => {
+    if (physicsState.state === "OPTIMAL" || !failing || !simConfig) {
+      setLesson({ key: null, data: null, loading: false });
+      return;
+    }
+    const family = `${activeTopic}|${failing.param}|${physicsState.state}|`;
+    const key = family + failing.value;
+    const cached = lessonCache.current.get(key);
+    if (cached) {
+      setLesson({ key, data: cached, loading: false });
+      return;
+    }
+    // Keep the previous lesson for the same breach on screen while the new
+    // numbers load, rather than flashing back to the template.
+    setLesson((prev) => ({ key, data: prev.key?.startsWith(family) ? prev.data : null, loading: true }));
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch("/api/explain-failure", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: ctrl.signal,
+          body: JSON.stringify({
+            topic: activeTopic,
+            simConfig,
+            params: vars,
+            param: failing.param,
+            value: failing.value,
+            severity: physicsState.state,
+            notesExcerpt: editorValue.slice(0, 2500),
+          }),
+        });
+        const json = await res.json();
+        if (json.lesson) {
+          lessonCache.current.set(key, json.lesson);
+          setLesson({ key, data: json.lesson, loading: false });
+        } else {
+          setLesson((l) => (l.key === key ? { ...l, loading: false } : l));
+        }
+      } catch {
+        /* Superseded by a newer slider value, or offline — the template stays. */
+      }
+    }, 700);
+    return () => {
+      clearTimeout(timer);
+      ctrl.abort();
+    };
+    // vars/editorValue are read at request time; refetching on every keystroke
+    // of the notes would be wasted calls.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [physicsState.state, failing?.param, failing?.value, activeTopic, simConfig]);
+
   const liveOk = physicsState.state !== "CRITICAL_FAILURE";
   const simType = simConfig?.simType || null;
   const notesQuality = useMemo(() => evaluateNotesQuality(editorValue, simConfig), [editorValue, simConfig]);
@@ -1116,7 +1181,7 @@ export default function PhysicsEditorPage() {
                       agentSteps={agentSteps}
                     />
                     <AnimatePresence mode="wait">
-                      <StatusCard key={physicsState.state} physicsState={physicsState} onAutoFix={handleAutoFix} />
+                      <StatusCard key={physicsState.state} physicsState={physicsState} lesson={lesson} onAutoFix={handleAutoFix} />
                     </AnimatePresence>
                   </div>
 
