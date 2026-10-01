@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { registerMeshAsset } from '@/lib/meshAssets';
 import { lookupModel, saveModel } from '@/lib/modelLibrary';
+import { lookupPhotoreal, savePhotoreal } from '@/lib/photorealStore';
 
 // Generated photoreal meshes. The provider is an implementation detail — do not
 // surface its name in responses, logs, or client-visible URLs.
@@ -69,6 +70,19 @@ export async function POST(req: Request) {
     // for. Keyed on the bare topic rather than the decorated prompt so wording
     // changes to the prompt do not orphan the stored model.
     const libraryKey = `photoreal ${libraryTopic}`;
+
+    // Shared across every user and instance, so anything generated once is
+    // instant for everyone after. Checked before anything that can cost credits.
+    const sharedUrl = await lookupPhotoreal(libraryKey);
+    if (sharedUrl) {
+      return NextResponse.json({
+        success: true,
+        cached: 'shared',
+        modelUrl: sharedUrl,
+        prompt,
+        format: 'glb',
+      });
+    }
 
     // The on-disk library is the real cache: it outlives restarts, so a model
     // is paid for exactly once ever rather than once per process.
@@ -227,7 +241,8 @@ async function pollTask(taskId: string, { prompt, libraryKey, cacheKey }: Genera
           try {
             const glbRes = await fetch(modelUrl);
             if (glbRes.ok) {
-              const glbBase64 = Buffer.from(await glbRes.arrayBuffer()).toString('base64');
+              const glb = Buffer.from(await glbRes.arrayBuffer());
+              const glbBase64 = glb.toString('base64');
               saveModel({
                 topic: libraryKey,
                 glbBase64,
@@ -235,7 +250,9 @@ async function pollTask(taskId: string, { prompt, libraryKey, cacheKey }: Genera
                 generator: 'photoreal',
                 score: null,
               });
-              storedUrl = `data:model/gltf-binary;base64,${glbBase64}`;
+              storedUrl =
+                (await savePhotoreal(libraryKey, glb)) ??
+                `data:model/gltf-binary;base64,${glbBase64}`;
             }
           } catch {
             // Serving straight from the provider still works for this session.
