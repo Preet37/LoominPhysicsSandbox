@@ -52,7 +52,7 @@ const resumable: Map<string, string> = (globalCache as any).__tripoResumable ?? 
 
 export async function POST(req: Request) {
   try {
-    const { prompt, topic, style = 'realistic' } = await req.json();
+    const { prompt, topic, style = 'realistic', fresh = false } = await req.json();
 
     if (!TRIPO_API_KEY) {
       return NextResponse.json({
@@ -73,7 +73,8 @@ export async function POST(req: Request) {
 
     // Shared across every user and instance, so anything generated once is
     // instant for everyone after. Checked before anything that can cost credits.
-    const sharedUrl = await lookupPhotoreal(libraryKey);
+    // `fresh` follows a thumbs-down: every cached copy is the rejected one.
+    const sharedUrl = fresh ? null : await lookupPhotoreal(libraryKey);
     if (sharedUrl) {
       return NextResponse.json({
         success: true,
@@ -86,7 +87,7 @@ export async function POST(req: Request) {
 
     // The on-disk library is the real cache: it outlives restarts, so a model
     // is paid for exactly once ever rather than once per process.
-    const stored = lookupModel(libraryKey);
+    const stored = fresh ? null : lookupModel(libraryKey);
     if (stored) {
       return NextResponse.json({
         success: true,
@@ -100,6 +101,7 @@ export async function POST(req: Request) {
     // In-memory layer in front of it, so concurrent requests for the same topic
     // during a single generation do not each start their own paid task.
     const cacheKey = `v3:${libraryTopic.toLowerCase()}_${style}`;
+    if (fresh) modelCache.delete(cacheKey);
     if (modelCache.has(cacheKey)) {
       return NextResponse.json({
         success: true,

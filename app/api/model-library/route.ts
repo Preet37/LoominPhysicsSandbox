@@ -8,6 +8,7 @@
 
 import { NextResponse } from "next/server";
 import { libraryStats, listModels, rejectModel, verifyModel } from "@/lib/modelLibrary";
+import { deletePhotoreal } from "@/lib/photorealStore";
 
 export async function GET() {
   return NextResponse.json({ stats: libraryStats(), models: listModels() });
@@ -24,6 +25,9 @@ export async function POST(req: Request) {
     switch (action) {
       case "reject": {
         const result = rejectModel(topic);
+        // Photoreal meshes also live in the shared store; leaving them there
+        // would keep serving the rejected model to every other user.
+        if (topic.startsWith("photoreal ")) await deletePhotoreal(topic);
         return NextResponse.json({ ok: true, ...result });
       }
       case "verify": {

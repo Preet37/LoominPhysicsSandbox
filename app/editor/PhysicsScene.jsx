@@ -131,7 +131,7 @@ function SceneContent({ simType, params, simConfig, topic, sceneCode, quality, s
         <directionalLight position={[-6, 8, 6]} intensity={0.8} color="#dbeafe" />
         <hemisphereLight intensity={0.8} color="#f8fbff" groundColor="#0b1220" />
         <FlowOverlay params={params} simConfig={simConfig}>
-          <Tripo3DModel topic={topic} />
+          <Tripo3DModel topic={topic} reloadToken={geometryReload} />
         </FlowOverlay>
       </>
     );

@@ -1069,7 +1069,8 @@ export default function PhysicsEditorPage() {
                               generateSceneCode(activeTopic, simType, vars, "USER MARKED THE 3D VISUAL AS INACCURATE. Rebuild from scratch with correct geometry.");
                             } else {
                               // Drop the stored model first, or the rebuild just replays it.
-                              await rejectStoredModel(activeTopic);
+                              // Photoreal meshes are stored under their own namespace.
+                              await rejectStoredModel(quality === "photoreal" ? `photoreal ${activeTopic}` : activeTopic);
                               setGeometryReload((k) => k + 1);
                             }
                           }}

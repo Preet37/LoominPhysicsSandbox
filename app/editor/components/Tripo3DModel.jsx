@@ -8,7 +8,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader";
 
 // Loader for generated photoreal meshes. The provider is an implementation
 // detail and must not surface in the UI, logs, or network paths.
-export default function Tripo3DModel({ topic, onFallback }) {
+export default function Tripo3DModel({ topic, onFallback, reloadToken = 0 }) {
   const [modelData, setModelData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -19,13 +19,14 @@ export default function Tripo3DModel({ topic, onFallback }) {
   // Generate model when topic changes
   useEffect(() => {
     if (!topic || topic === 'generic') return;
-    if (topic === lastTopic) return;
+    const requestKey = `${topic}#${reloadToken}`;
+    if (requestKey === lastTopic) return;
     
     const generateModel = async () => {
       setLoading(true);
       setError(null);
       setProgress(0);
-      setLastTopic(topic);
+      setLastTopic(requestKey);
       
       try {
         // Request a generated mesh
@@ -35,7 +36,10 @@ export default function Tripo3DModel({ topic, onFallback }) {
           body: JSON.stringify({
             topic,
             prompt: `High quality 3D model of ${topic}, detailed, realistic`,
-            style: 'realistic'
+            style: 'realistic',
+            // Set after a thumbs-down: the stored mesh was judged wrong, so
+            // skip every cache layer and generate a replacement.
+            fresh: reloadToken > 0
           })
         });
         
@@ -63,7 +67,7 @@ export default function Tripo3DModel({ topic, onFallback }) {
     };
 
     generateModel();
-  }, [topic]);
+  }, [topic, reloadToken]);
 
   // Deliberately static. A constant spin reads as a turntable product shot and
   // makes it impossible to study the object or line it up with a parameter

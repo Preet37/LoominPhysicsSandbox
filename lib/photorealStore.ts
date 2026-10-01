@@ -12,7 +12,7 @@
  * every call is a no-op and the route behaves exactly as it did before.
  */
 
-import { head, put, BlobNotFoundError } from "@vercel/blob";
+import { del, head, put, BlobNotFoundError } from "@vercel/blob";
 import { topicKey } from "@/lib/modelLibrary";
 
 const enabled = Boolean(process.env.BLOB_READ_WRITE_TOKEN);
@@ -26,7 +26,9 @@ export async function lookupPhotoreal(libraryKey: string): Promise<string | null
   if (!enabled) return null;
   try {
     const blob = await head(pathnameFor(libraryKey));
-    return blob.url;
+    // Versioned so a replacement written after a thumbs-down is never masked
+    // by a browser still holding the rejected mesh under the same pathname.
+    return `${blob.url}?v=${blob.uploadedAt.getTime()}`;
   } catch (e) {
     // A miss is the normal case. Anything else (network, quota) must not block
     // generation — fall through and let the request proceed uncached.
@@ -48,9 +50,19 @@ export async function savePhotoreal(libraryKey: string, glb: Buffer): Promise<st
       allowOverwrite: true,
       cacheControlMaxAge: 60 * 60 * 24 * 30,
     });
-    return blob.url;
+    return `${blob.url}?v=${Date.now()}`;
   } catch (e) {
     console.warn("[photorealStore] save failed:", String(e).slice(0, 160));
     return null;
+  }
+}
+
+/** Thumbs-down: remove the mesh so the next request generates a replacement. */
+export async function deletePhotoreal(libraryKey: string): Promise<void> {
+  if (!enabled) return;
+  try {
+    await del(pathnameFor(libraryKey));
+  } catch (e) {
+    console.warn("[photorealStore] delete failed:", String(e).slice(0, 160));
   }
 }
