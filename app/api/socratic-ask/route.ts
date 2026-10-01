@@ -15,7 +15,7 @@ import { NextResponse } from "next/server";
 const NVIDIA_BASE = "https://integrate.api.nvidia.com/v1";
 const NVIDIA_FAST = "nvidia/llama-3.1-nemotron-nano-8b-v1";
 const GROQ_BASE = "https://api.groq.com/openai/v1";
-const GROQ_FAST = "llama-3.1-8b-instant";
+const GROQ_FAST = "openai/gpt-oss-20b";
 
 export async function POST(req: Request) {
   const {

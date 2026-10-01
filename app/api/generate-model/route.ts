@@ -85,7 +85,7 @@ Generate accurate, symmetrical models following these exact conventions.`;
         { role: 'system', content: systemPrompt },
         { role: 'user', content: `Create a detailed, accurate 3D model of: ${topic}\n\nEnsure all parts are symmetrical where appropriate (wheels on both sides, lights on both sides, etc.)${context ? `\n\nContext: ${context.slice(0, 200)}` : ''}` }
       ],
-      model: 'llama-3.3-70b-versatile',
+      model: 'openai/gpt-oss-120b',
       response_format: { type: 'json_object' },
       temperature: 0.5, // Lower temperature for more consistent output
     });

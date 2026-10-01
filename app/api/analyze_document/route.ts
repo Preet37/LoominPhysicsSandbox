@@ -26,7 +26,7 @@ import {
 export const maxDuration = 300;
 
 const GROQ_BASE = "https://api.groq.com/openai/v1";
-const GROQ_MODEL = "llama-3.3-70b-versatile";
+const GROQ_MODEL = "openai/gpt-oss-120b";
 const NVIDIA_BASE = "https://integrate.api.nvidia.com/v1";
 const NVIDIA_MODEL = "nvidia/llama-3.1-nemotron-nano-8b-v1";
 

@@ -13,7 +13,7 @@ import { NextResponse } from "next/server";
 const NVIDIA_BASE = "https://integrate.api.nvidia.com/v1";
 const NVIDIA_FAST = "nvidia/llama-3.1-nemotron-nano-8b-v1";
 const GROQ_BASE = "https://api.groq.com/openai/v1";
-const GROQ_MODEL = "llama-3.3-70b-versatile";
+const GROQ_MODEL = "openai/gpt-oss-120b";
 
 async function callLLM(prompt: string, maxTokens = 2500): Promise<string> {
   const messages = [{ role: "user", content: prompt }];

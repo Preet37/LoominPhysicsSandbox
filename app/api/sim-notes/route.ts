@@ -12,8 +12,8 @@ import {
 
 assertLiveModels('sim-notes', [NVIDIA_THINKING, NVIDIA_FAST]);
 
-const GROQ_THINKING   = 'llama-3.3-70b-versatile';
-const GROQ_FAST       = 'llama-3.1-8b-instant';
+const GROQ_THINKING   = 'openai/gpt-oss-120b';
+const GROQ_FAST       = 'openai/gpt-oss-20b';
 
 // ── THINKING MODEL prompt (large model, detailed) ──────────────────────────
 const THINKING_PROMPT = `You are a physics simulation assistant for Loomin. Start your response immediately with the markdown — no preamble, no "Sure!", no commentary.

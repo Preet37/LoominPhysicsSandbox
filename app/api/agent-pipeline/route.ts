@@ -539,7 +539,7 @@ export async function POST(req: Request) {
             console.warn('[agent-pipeline] NVIDIA stream failed, falling back to Groq:', String(nvidiaErr).slice(0, 120));
             usedFallback = true;
             // If we got some text already, keep it; otherwise start fresh with Groq
-            const groqModel = isFast ? 'llama-3.1-8b-instant' : 'llama-3.3-70b-versatile';
+            const groqModel = isFast ? 'openai/gpt-oss-20b' : 'openai/gpt-oss-120b';
             if (fullText.length < 200) {
               // Start fresh — nothing useful was captured
               fullText = '';
@@ -555,7 +555,7 @@ export async function POST(req: Request) {
             }
           }
         } else {
-          const model = isFast ? 'llama-3.1-8b-instant' : 'llama-3.3-70b-versatile';
+          const model = isFast ? 'openai/gpt-oss-20b' : 'openai/gpt-oss-120b';
           await streamDesign(groqStream(messages, model, isFast ? 2000 : 3500));
         }
 

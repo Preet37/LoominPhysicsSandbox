@@ -48,7 +48,7 @@ Respond in JSON:
 }`;
 
     const researchResult = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+      model: 'openai/gpt-oss-120b',
       messages: [{ role: 'user', content: researchPrompt }],
       temperature: 0.3,
       max_tokens: 2000,
@@ -117,7 +117,7 @@ OUTPUT EXACT JSON FORMAT:
 Generate 10-20 parts with proper positions. Include ALL parts from the research.`;
 
     const generateResult = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+      model: 'openai/gpt-oss-120b',
       messages: [{ role: 'user', content: generatePrompt }],
       temperature: 0.4,
       max_tokens: 4000,

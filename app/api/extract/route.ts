@@ -26,7 +26,7 @@ async function generateNewSimulation(notes: string) {
         { role: 'system', content: systemPrompt },
         { role: 'user', content: notes }
       ],
-      model: 'llama-3.3-70b-versatile',
+      model: 'openai/gpt-oss-120b',
       response_format: { type: 'json_object' }
     });
     parsedData = JSON.parse(completion.choices[0]?.message?.content || '{}');
@@ -71,7 +71,7 @@ async function generateNewSimulation(notes: string) {
     try {
         const report = await groq.chat.completions.create({
           messages: [{ role: 'user', content: `Explain physics failure: ${topic}, vars: ${JSON.stringify(vars)}. Reason: ${message}. Write 1 dramatic sentence.` }],
-          model: 'llama-3.3-70b-versatile',
+          model: 'openai/gpt-oss-120b',
         });
         aiExplanation = report.choices[0]?.message?.content || "Catastrophic failure.";
     } catch (e) {}

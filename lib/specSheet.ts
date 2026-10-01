@@ -34,7 +34,7 @@ const GEMINI_MAX_OUTPUT_TOKENS = 8192;
 const NVIDIA_BASE = "https://integrate.api.nvidia.com/v1";
 const NVIDIA_RESEARCH_MODEL = "meta/llama-3.1-405b-instruct";
 const GROQ_BASE = "https://api.groq.com/openai/v1";
-const GROQ_RESEARCH_MODEL = "llama-3.3-70b-versatile";
+const GROQ_RESEARCH_MODEL = "openai/gpt-oss-120b";
 
 export const searchGroundingEnabled = () =>
   process.env.ENABLE_SEARCH_GROUNDING === "1" || process.env.ENABLE_SEARCH_GROUNDING === "true";

@@ -46,7 +46,7 @@ import {
 const NVIDIA_RESEARCH_MODEL = NVIDIA_FAST;
 assertLiveModels("generate-scene", [...NVIDIA_CODE_CHAIN, NVIDIA_RESEARCH_MODEL]);
 
-const REVIEW_MODEL   = "llama-3.3-70b-versatile";
+const REVIEW_MODEL   = "openai/gpt-oss-120b";
 const MAX_AGENT_TURNS = 4;
 
 /**

@@ -435,7 +435,7 @@ async function callGroqForPlan(prompt: string, timeoutMs: number): Promise<unkno
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
       signal: AbortSignal.timeout(timeoutMs),
       body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
+        model: "openai/gpt-oss-120b",
         temperature: 0.2,
         max_tokens: 3000,
         response_format: { type: "json_object" },
@@ -488,7 +488,7 @@ export async function researchGeometryPlan(
     }
     if (!raw) {
       raw = await callGroqForPlan(prompt, timeoutMs);
-      source = "llama-3.3-70b-versatile";
+      source = "openai/gpt-oss-120b";
     }
 
     const plan = coerceGeometryPlan(raw, topic, source);

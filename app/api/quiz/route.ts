@@ -7,7 +7,7 @@
 import { NextResponse } from "next/server";
 
 const GROQ_BASE = "https://api.groq.com/openai/v1";
-const GROQ_MODEL = "llama-3.3-70b-versatile";
+const GROQ_MODEL = "openai/gpt-oss-120b";
 
 const QUIZ_SYSTEM = `You are a physics quiz generator. Create exactly the requested number of multiple-choice questions from the provided physics notes.
 

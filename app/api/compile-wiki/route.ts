@@ -21,7 +21,7 @@ import {
 assertLiveModels("compile-wiki", [NVIDIA_THINKING]);
 
 const GROQ_BASE = "https://api.groq.com/openai/v1";
-const GROQ_MODEL = "llama-3.3-70b-versatile";
+const GROQ_MODEL = "openai/gpt-oss-120b";
 
 async function callLLM(system: string, user: string, maxTokens = 3000): Promise<string> {
   const messages = [

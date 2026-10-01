@@ -768,7 +768,7 @@ async function generateOpenScadScript(
       ? `\nVERIFIED DIMENSIONS (use these exact proportions in mm):\n${spec.dimensions.map((d) => `- ${d.label}: ${d.value} ${d.unit}`).join("\n")}\n`
       : "";
     const completion = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+      model: "openai/gpt-oss-120b",
       messages: [{ role: "user", content: openScadPrompt(topic, params, feedback) + specBlock }],
       temperature: 0.25,
       max_tokens: 2000,
@@ -784,7 +784,7 @@ async function generateBlenderScript(topic: string, params: ParamsMap, feedback:
   if (!process.env.GROQ_API_KEY) return deterministicBlenderScript(topic, params ?? {});
   try {
     const completion = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+      model: "openai/gpt-oss-120b",
       messages: [{ role: "user", content: blenderScriptPrompt(topic, params, feedback) }],
       temperature: 0.2,
       max_tokens: 2800,

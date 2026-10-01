@@ -119,7 +119,7 @@ Be educational and explain WHY each parameter matters.
         { role: 'system', content: systemPrompt },
         { role: 'user', content: `User Request: ${prompt}\n\nExisting Notes Context: ${context}` }
       ],
-      model: 'llama-3.3-70b-versatile',
+      model: 'openai/gpt-oss-120b',
     });
 
     let result = completion.choices[0]?.message?.content || '';
